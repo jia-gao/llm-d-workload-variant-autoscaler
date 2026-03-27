@@ -4,9 +4,10 @@ concurrency:
   group: >-
     ${{
       github.event_name == 'issue_comment' &&
-      !contains(github.event.comment.body, '/benchmark kind')
+      !contains(github.event.comment.body, '/benchmark kind') &&
+      !contains(github.event.comment.body, '/benchmark openshift')
       && format('benchmark-isolated-{0}', github.run_id)
-      || format('benchmark-kind-{0}',
+      || format('benchmark-{0}',
            github.event.issue.number
            || github.run_id)
     }}
@@ -15,6 +16,14 @@ concurrency:
 on:
   issue_comment:
     types: [created]
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform: kind or openshift'
+        required: true
+        default: 'kind'
+        type: choice
+        options: [kind, openshift]
 
 jobs:
   gate:
@@ -24,6 +33,7 @@ jobs:
       pull-requests: write
     outputs:
       run_benchmark: ${{ steps.check.outputs.run_benchmark }}
+      platform: ${{ steps.check.outputs.platform }}
       pr_number: ${{ steps.check.outputs.pr_number }}
       pr_head_sha: ${{ steps.check.outputs.pr_head_sha }}
       pr_head_repo: ${{ steps.check.outputs.pr_head_repo }}
@@ -48,8 +58,19 @@ jobs:
               }
             }
 
-            if (context.eventName !== 'issue_comment') {
+            if (context.eventName !== 'issue_comment' && context.eventName !== 'workflow_dispatch') {
               core.setOutput('run_benchmark', 'false');
+              return;
+            }
+
+            if (context.eventName === 'workflow_dispatch') {
+              const platform = context.payload.inputs.platform;
+              const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+              console.log(`Manual benchmark dispatch for ${platform}`);
+              
+              core.setOutput('run_benchmark', 'true');
+              core.setOutput('platform', platform);
+              // Don't set PR-specific outputs for manual runs
               return;
             }
 
@@ -62,7 +83,7 @@ jobs:
               return;
             }
 
-            const validCommands = ['/benchmark kind'];
+            const validCommands = ['/benchmark kind', '/benchmark openshift'];
             if (!validCommands.includes(comment)) {
               console.log(`Comment "${comment}" is not a valid benchmark command, skipping`);
               core.setOutput('run_benchmark', 'false');
@@ -97,22 +118,59 @@ jobs:
             });
 
             const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const platform = comment.includes('openshift') ? 'OpenShift' : 'Kind';
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: issue.number,
-              body: `🚀 **Benchmark (Kind)** triggered by \`/benchmark kind\`\n\n[View the benchmark workflow run](${runUrl})`
+              body: `🚀 **Benchmark (${platform})** triggered by \`${comment}\`\n\n[View the benchmark workflow run](${runUrl})`
             });
 
             core.setOutput('run_benchmark', 'true');
+            core.setOutput('platform', platform.toLowerCase());
             core.setOutput('pr_number', issue.number.toString());
             core.setOutput('pr_head_sha', pr.head.sha);
             core.setOutput('pr_head_repo', headRepo);
 
+  build-image:
+    needs: gate
+    if: needs.gate.outputs.run_benchmark == 'true' && (needs.gate.outputs.platform == 'openshift' || github.event.inputs.platform == 'openshift')
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.build.outputs.image_tag }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.pr_head_sha }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.CR_USER }}
+          password: ${{ secrets.CR_TOKEN }}
+
+      - name: Build and push image
+        id: build
+        env:
+          REGISTRY: ghcr.io
+          IMAGE_NAME: ${{ github.repository }}
+          GIT_REF: ${{ needs.gate.outputs.pr_head_sha }}
+        run: |
+          IMAGE_TAG="bench-$(printf '%s' "$GIT_REF" | cut -c1-8)"
+          FULL_IMAGE="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+          echo "Building image: $FULL_IMAGE"
+          
+          make docker-build IMG="$FULL_IMAGE"
+          make docker-push IMG="$FULL_IMAGE"
+          
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+
   benchmark-kind:
     runs-on: ubuntu-latest
     needs: [gate]
-    if: needs.gate.outputs.run_benchmark == 'true'
+    if: needs.gate.outputs.run_benchmark == 'true' && (needs.gate.outputs.platform == 'kind' || github.event.inputs.platform == 'kind')
     timeout-minutes: 45
     permissions:
       contents: write
@@ -121,6 +179,7 @@ jobs:
       actions: read
     steps:
       - name: Set pending status on PR head
+        if: github.event_name == 'issue_comment'
         uses: actions/github-script@v7
         with:
           script: |
@@ -135,6 +194,7 @@ jobs:
             });
 
       - name: Validate PR head SHA
+        if: github.event_name == 'issue_comment'
         run: |
           if [ -z "${{ needs.gate.outputs.pr_head_sha }}" ]; then
             echo "::error::pr_head_sha is empty — refusing to fall back to main"
@@ -146,7 +206,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ needs.gate.outputs.pr_head_repo || github.repository }}
-          ref: ${{ needs.gate.outputs.pr_head_sha }}
+          ref: ${{ needs.gate.outputs.pr_head_sha || github.sha }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract Go version from go.mod
@@ -361,9 +421,286 @@ jobs:
         if: always()
         run: kind delete cluster --name kind-wva-gpu-cluster || true
 
+  benchmark-openshift:
+    runs-on: [self-hosted, openshift, vllm-d]
+    needs: [gate, build-image]
+    if: needs.gate.outputs.run_benchmark == 'true' && (needs.gate.outputs.platform == 'openshift' || github.event.inputs.platform == 'openshift')
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      statuses: write
+      pull-requests: write
+      actions: read
+    env:
+      MODEL_ID: 'unsloth/Meta-Llama-3.1-8B'
+      ACCELERATOR_TYPE: 'H100'
+      GOTOOLCHAIN: auto
+      LLMD_NAMESPACE: llm-d-benchmark-pr-${{ needs.gate.outputs.pr_number || github.run_id }}
+      WVA_NAMESPACE: wva-benchmark-pr-${{ needs.gate.outputs.pr_number || github.run_id }}
+      WVA_RELEASE_NAME: wva-bench-${{ github.run_id }}
+      WVA_IMAGE_TAG: ${{ needs.build-image.outputs.image_tag }}
+    steps:
+      - name: Set pending status on PR head
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: '${{ needs.gate.outputs.pr_head_sha }}',
+              state: 'pending',
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              description: 'Benchmark running on OpenShift...',
+              context: '${{ github.workflow }} / benchmark-openshift'
+            });
+
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.gate.outputs.pr_head_repo || github.repository }}
+          ref: ${{ needs.gate.outputs.pr_head_sha || github.sha }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.x"
+          cache-dependency-path: ./go.sum
+
+      - name: Install tools (kubectl, oc, helm, make)
+        run: |
+          sudo apt-get update && sudo apt-get install -y make
+          KUBECTL_VERSION="v1.31.0"
+          curl -fsSL --retry 3 --retry-delay 5 -o kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+          curl -fsSL --retry 3 --retry-delay 5 -O "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz"
+          tar -xzf openshift-client-linux.tar.gz
+          sudo mv oc /usr/local/bin/
+          rm -f openshift-client-linux.tar.gz kubectl README.md
+          curl -fsSL --retry 3 --retry-delay 5 https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: Verify cluster access
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Get HF token from cluster secret
+        id: hf-token
+        run: |
+          HF_TOKEN=$(kubectl get secret llm-d-hf-token -n default -o jsonpath='{.data.HF_TOKEN}' | base64 -d)
+          echo "::add-mask::$HF_TOKEN"
+          echo "HF_TOKEN=$HF_TOKEN" >> $GITHUB_ENV
+
+      - name: Clean up resources for this PR
+        run: |
+          for ns in "$LLMD_NAMESPACE" "$WVA_NAMESPACE"; do
+            if kubectl get namespace "$ns" &>/dev/null; then
+              kubectl delete hpa -n "$ns" -l app.kubernetes.io/name=workload-variant-autoscaler --ignore-not-found || true
+              kubectl delete variantautoscaling -n "$ns" -l app.kubernetes.io/name=workload-variant-autoscaler --ignore-not-found || true
+              for release in $(helm list -n "$ns" -q 2>/dev/null); do
+                helm uninstall "$release" -n "$ns" --ignore-not-found --wait --timeout 60s || true
+              done
+              kubectl delete namespace "$ns" --ignore-not-found --timeout=60s || true
+            fi
+          done
+
+      - name: Apply latest CRDs
+        run: kubectl apply -f charts/workload-variant-autoscaler/crds/
+
+      - name: Deploy WVA and llm-d infrastructure
+        env:
+          ENVIRONMENT: openshift
+          INSTALL_GATEWAY_CTRLPLANE: "false"
+          E2E_TESTS_ENABLED: "true"
+          NAMESPACE_SCOPED: "false"
+          LLMD_NS: ${{ env.LLMD_NAMESPACE }}
+          WVA_NS: ${{ env.WVA_NAMESPACE }}
+          CONTROLLER_INSTANCE: ${{ env.WVA_NAMESPACE }}
+          DEPLOY_VA: "false"
+          DEPLOY_HPA: "false"
+          VLLM_MAX_NUM_SEQS: "5"
+          DECODE_REPLICAS: "1"
+          MONITORING_NAMESPACE: openshift-user-workload-monitoring
+          WVA_METRICS_SECURE: "false"
+          KV_SPARE_TRIGGER: "0.5"
+          QUEUE_SPARE_TRIGGER: "4.5"
+          VLLM_SVC_PORT: "8000"
+          INSTALL_GRAFANA: "true"
+        run: |
+          ./deploy/install.sh --model "$MODEL_ID" --accelerator "$ACCELERATOR_TYPE" --release-name "$WVA_RELEASE_NAME" --environment openshift
+
+      - name: Label namespaces for OpenShift monitoring
+        run: |
+          kubectl label namespace "$LLMD_NAMESPACE" openshift.io/user-monitoring=true --overwrite
+          kubectl label namespace "$WVA_NAMESPACE" openshift.io/user-monitoring=true --overwrite
+
+      - name: Wait for infrastructure to be ready
+        run: |
+          kubectl rollout status deployment -l app.kubernetes.io/name=workload-variant-autoscaler -n "$WVA_NAMESPACE" --timeout=300s || true
+          kubectl rollout status deployment/ms-inference-scheduling-llm-d-modelservice-decode -n "$LLMD_NAMESPACE" --timeout=1500s || true
+
+      - name: Run benchmark
+        env:
+          ENVIRONMENT: openshift
+          USE_SIMULATOR: "true"
+          SCALER_BACKEND: prometheus-adapter
+          CONTROLLER_NAMESPACE: ${{ env.WVA_NAMESPACE }}
+          E2E_MONITORING_NAMESPACE: openshift-user-workload-monitoring
+          E2E_EMULATED_LLMD_NAMESPACE: ${{ env.LLMD_NAMESPACE }}
+          CONTROLLER_INSTANCE: ${{ env.WVA_NAMESPACE }}
+          BENCHMARK_RESULTS_FILE: /tmp/benchmark-results.json
+          BENCHMARK_GRAFANA_ENABLED: "true"
+          BENCHMARK_GRAFANA_SNAPSHOT_FILE: /tmp/benchmark-grafana-snapshot.txt
+          BENCHMARK_GRAFANA_SNAPSHOT_JSON: /tmp/benchmark-grafana-snapshot.json
+          BENCHMARK_GRAFANA_PANEL_DIR: /tmp/benchmark-panels
+          KV_SPARE_TRIGGER: "0.5"
+          QUEUE_SPARE_TRIGGER: "4.5"
+        run: make test-benchmark
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-openshift
+          path: |
+            /tmp/benchmark-results.json
+            /tmp/benchmark-grafana-snapshot.txt
+            /tmp/benchmark-grafana-snapshot.json
+            /tmp/benchmark-panels/
+          if-no-files-found: warn
+
+      - name: Post benchmark results as PR comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const prNumber = parseInt('${{ needs.gate.outputs.pr_number }}');
+            const sha = '${{ needs.gate.outputs.pr_head_sha }}';
+            const runId = context.runId;
+            const repoUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}`;
+
+            let artifactUrl = `${repoUrl}/actions/runs/${runId}`;
+            try {
+              const { data: { artifacts } } = await github.rest.actions.listWorkflowRunArtifacts({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: runId
+              });
+              const benchArtifact = artifacts.find(a => a.name === 'benchmark-results-openshift');
+              if (benchArtifact) {
+                artifactUrl = `${repoUrl}/actions/runs/${runId}/artifacts/${benchArtifact.id}`;
+              }
+            } catch (e) {
+              console.log(`Could not look up artifact: ${e.message}`);
+            }
+
+            let resultsTable = '⚠️ Benchmark results file not found or could not be parsed.';
+            try {
+              const data = JSON.parse(fs.readFileSync('/tmp/benchmark-results.json', 'utf8'));
+              const fmtTime = (v) => v < 0 ? 'N/A' : `${v.toFixed(1)}s`;
+              resultsTable = `| Metric | Value |
+            |--------|-------|
+            | Scale-up time | ${fmtTime(data.scaleUpTimeSec)} |
+            | Scale-down time | ${fmtTime(data.scaleDownTimeSec)} |
+            | Max replicas | ${data.maxReplicas} |
+            | Avg KV cache usage | ${data.avgKVCacheUsage.toFixed(3)} |
+            | Avg queue depth | ${data.avgQueueDepth.toFixed(1)} |
+            | Replica oscillation (σ) | ${data.replicaOscillation.toFixed(2)} |
+            | Total duration | ${data.totalDurationSec.toFixed(0)}s |`;
+            } catch (e) {
+              console.log(`Could not read results: ${e.message}`);
+            }
+
+            let panelImages = '';
+            const panelDir = '/tmp/benchmark-panels';
+            const hasPanels = fs.existsSync(panelDir) && fs.readdirSync(panelDir).some(f => f.endsWith('.png'));
+
+            if (hasPanels) {
+              const pngs = fs.readdirSync(panelDir).filter(f => f.endsWith('.png')).sort();
+              const tag = `benchmark-run-os-${runId}`;
+              try {
+                const release = await github.rest.repos.createRelease({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag_name: tag,
+                  name: `Benchmark panels OpenShift (PR #${prNumber}, ${sha.substring(0, 7)})`,
+                  body: `Auto-generated by benchmark CI run #${runId}`,
+                  draft: false,
+                  prerelease: true
+                });
+
+                const imageUrls = [];
+                for (const png of pngs) {
+                  const filePath = path.join(panelDir, png);
+                  const fileData = fs.readFileSync(filePath);
+                  const asset = await github.rest.repos.uploadReleaseAsset({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    release_id: release.data.id,
+                    name: png,
+                    data: fileData,
+                    headers: { 'content-type': 'image/png' }
+                  });
+                  const title = png.replace('panel-', '').replace('.png', '').replace(/-/g, ' ');
+                  imageUrls.push(`#### ${title}\n![${title}](${asset.data.browser_download_url})`);
+                }
+
+                if (imageUrls.length > 0) {
+                  panelImages = `\n\n<details>\n<summary>Dashboard Panels (${imageUrls.length})</summary>\n\n${imageUrls.join('\n\n')}\n\n</details>`;
+                }
+              } catch (e) {
+                console.log(`Could not upload panel images: ${e.message}`);
+              }
+            }
+
+            const hasSnapshotJson = fs.existsSync('/tmp/benchmark-grafana-snapshot.json');
+            let artifactsSection = '';
+            if (hasSnapshotJson || hasPanels) {
+              const items = [];
+              if (hasSnapshotJson) items.push('Grafana snapshot JSON');
+              artifactsSection = `\n\n📎 **[Download artifacts](${artifactUrl})**${items.length ? ' — ' + items.join(', ') : ''}`;
+            }
+
+            const body = `## Benchmark: scale-up-latency (OpenShift)
+
+            ${resultsTable}${panelImages}${artifactsSection}
+
+            <details>
+            <summary>Environment</summary>
+
+            - Cluster: OpenShift (Real GPUs)
+            - Model: unsloth/Meta-Llama-3.1-8B
+            - Accelerator: H100
+            - Commit: ${sha.substring(0, 7)}
+            - Scaler: prometheus-adapter
+            - [Workflow run](${repoUrl}/actions/runs/${runId})
+
+            </details>`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: body
+            });
+
+      - name: Cleanup infrastructure
+        if: always()
+        run: |
+          helm uninstall "$WVA_RELEASE_NAME" -n "$WVA_NAMESPACE" --ignore-not-found --wait --timeout 60s || true
+          for release in $(helm list -n "$LLMD_NAMESPACE" -q 2>/dev/null); do
+            helm uninstall "$release" -n "$LLMD_NAMESPACE" --ignore-not-found --wait --timeout 60s || true
+          done
+          kubectl delete namespace "$LLMD_NAMESPACE" --ignore-not-found --timeout=120s || true
+          kubectl delete namespace "$WVA_NAMESPACE" --ignore-not-found --timeout=120s || true
+
   report-status:
     runs-on: ubuntu-latest
-    needs: [gate, benchmark-kind]
+    needs: [gate, benchmark-kind, benchmark-openshift]
     if: always() && needs.gate.outputs.run_benchmark == 'true'
     permissions:
       statuses: write
@@ -373,7 +710,14 @@ jobs:
         with:
           script: |
             const prHeadSha = '${{ needs.gate.outputs.pr_head_sha }}';
-            const benchResult = '${{ needs.benchmark-kind.result }}';
+            const platform = '${{ needs.gate.outputs.platform }}';
+            
+            let benchResult;
+            if (platform === 'openshift') {
+              benchResult = '${{ needs.benchmark-openshift.result }}';
+            } else {
+              benchResult = '${{ needs.benchmark-kind.result }}';
+            }
 
             if (!prHeadSha) {
               console.log('No PR head SHA available, skipping status report');

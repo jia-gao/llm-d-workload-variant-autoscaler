@@ -80,8 +80,14 @@ var _ = BeforeSuite(func() {
 
 	ctx, cancel = context.WithCancel(context.Background())
 
+	// Determine Prometheus service name based on environment
+	promServiceName := "kube-prometheus-stack-prometheus"
+	if benchCfg.Environment == "openshift" {
+		promServiceName = "prometheus-user-workload"
+	}
+
 	By("Setting up port-forward to Prometheus")
-	portForwardCmd = utils.SetUpPortForward(k8sClient, ctx, "kube-prometheus-stack-prometheus", benchCfg.MonitoringNS, 9090, 9090)
+	portForwardCmd = utils.SetUpPortForward(k8sClient, ctx, promServiceName, benchCfg.MonitoringNS, 9090, 9090)
 
 	By("Verifying Prometheus port-forward is ready")
 	err = utils.VerifyPortForwardReadiness(ctx, 9090, "https://localhost:9090/-/ready")

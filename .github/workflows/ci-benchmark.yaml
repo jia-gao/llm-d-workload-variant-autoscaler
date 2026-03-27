@@ -548,7 +548,7 @@ jobs:
       - name: Run benchmark
         env:
           ENVIRONMENT: openshift
-          USE_SIMULATOR: "true"
+          USE_SIMULATOR: "false"
           SCALER_BACKEND: prometheus-adapter
           CONTROLLER_NAMESPACE: ${{ env.WVA_NAMESPACE }}
           E2E_MONITORING_NAMESPACE: openshift-user-workload-monitoring

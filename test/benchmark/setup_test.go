@@ -96,7 +96,7 @@ func setupBenchmarkScenario(res ScenarioResources) {
 		deployment, err := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Get(ctx, res.DeploymentName, metav1.GetOptions{})
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(deployment.Status.ReadyReplicas).To(BeNumerically(">=", 1), "Deployment should have at least 1 ready replica")
-	}, 5*time.Minute, 5*time.Second).Should(Succeed())
+	}, 15*time.Minute, 5*time.Second).Should(Succeed())
 
 	By("Waiting for VA to stabilize")
 	Eventually(func(g Gomega) {

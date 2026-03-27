@@ -476,6 +476,11 @@ func startPortForwarding(service *corev1.Service, namespace string, localPort, s
 	portForwardCmd := exec.Command("kubectl", "port-forward",
 		fmt.Sprintf("service/%s", service.Name),
 		fmt.Sprintf("%d:%d", localPort, servicePort), "-n", namespace)
+	
+	// Capture output for debugging
+	portForwardCmd.Stdout = os.Stdout
+	portForwardCmd.Stderr = os.Stderr
+	
 	err := portForwardCmd.Start()
 	gom.Expect(err).NotTo(gom.HaveOccurred(), fmt.Sprintf("Port-forward command should start successfully for service: %s", service.Name))
 
@@ -725,10 +730,20 @@ func VerifyPortForwardReadiness(ctx context.Context, localPort int, request stri
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		}
 	}
+	
+	var roundTripper http.RoundTripper = tr
+	if token := os.Getenv("PROMETHEUS_TOKEN"); token != "" {
+		roundTripper = &authRoundTripper{
+			token: token,
+			rt:    tr,
+		}
+	}
+
 	err := wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, 30*time.Second, true, func(ctx context.Context) (bool, error) {
-		client = &http.Client{Transport: tr, Timeout: 5 * time.Second}
+		client = &http.Client{Transport: roundTripper, Timeout: 5 * time.Second}
 		resp, err := client.Get(request)
 		if err != nil {
+			fmt.Printf("Debug: Error connecting to %s: %v, retrying...\n", request, err)
 			return false, nil // Retrying
 		}
 		defer func() {
@@ -736,7 +751,7 @@ func VerifyPortForwardReadiness(ctx context.Context, localPort int, request stri
 			gom.Expect(err).NotTo(gom.HaveOccurred(), "Should be able to close response body")
 		}()
 		// Retry on 4xx and 5xx errors
-		if resp.StatusCode >= 500 {
+		if resp.StatusCode >= 400 {
 			fmt.Printf("Debug: Error - Returned status code: %d, retrying...\n", resp.StatusCode)
 			return false, nil // Retry on client and server errors
 		}
@@ -980,19 +995,41 @@ func (p *PrometheusClient) API() promv1.API {
 	return p.client
 }
 
+type authRoundTripper struct {
+	token string
+	rt    http.RoundTripper
+}
+
+func (a *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.Header.Set("Authorization", "Bearer "+a.token)
+	return a.rt.RoundTrip(req)
+}
+
 // creates a new Prometheus client for e2e tests
 func NewPrometheusClient(baseURL string, insecureSkipVerify bool) (*PrometheusClient, error) {
 	config := promAPI.Config{
 		Address: baseURL,
 	}
 
+	roundTripper := promAPI.DefaultRoundTripper
 	if insecureSkipVerify {
-		roundTripper := promAPI.DefaultRoundTripper
 		if rt, ok := roundTripper.(*http.Transport); ok {
-			rt.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+			// Create a copy of the transport to avoid modifying the default
+			tr := rt.Clone()
+			tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+			roundTripper = tr
 		}
-		config.RoundTripper = roundTripper
 	}
+
+	// Add token if provided
+	if token := os.Getenv("PROMETHEUS_TOKEN"); token != "" {
+		roundTripper = &authRoundTripper{
+			token: token,
+			rt:    roundTripper,
+		}
+	}
+
+	config.RoundTripper = roundTripper
 
 	client, err := promAPI.NewClient(config)
 	if err != nil {

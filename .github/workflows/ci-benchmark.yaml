@@ -540,6 +540,10 @@ jobs:
         run: |
           kubectl rollout status deployment -l app.kubernetes.io/name=workload-variant-autoscaler -n "$WVA_NAMESPACE" --timeout=300s || true
           kubectl rollout status deployment/ms-inference-scheduling-llm-d-modelservice-decode -n "$LLMD_NAMESPACE" --timeout=1500s || true
+          echo "--- Services in openshift-user-workload-monitoring ---"
+          kubectl get svc -n openshift-user-workload-monitoring
+          echo "--- Services in openshift-monitoring ---"
+          kubectl get svc -n openshift-monitoring
 
       - name: Run benchmark
         env:
@@ -557,7 +561,10 @@ jobs:
           BENCHMARK_GRAFANA_PANEL_DIR: /tmp/benchmark-panels
           KV_SPARE_TRIGGER: "0.5"
           QUEUE_SPARE_TRIGGER: "4.5"
-        run: make test-benchmark
+        run: |
+          # Get token for Thanos querier
+          export PROMETHEUS_TOKEN=$(kubectl create token prometheus-k8s -n openshift-monitoring --duration=24h 2>/dev/null || echo "")
+          make test-benchmark
 
       - name: Upload benchmark results
         if: always()

@@ -1,0 +1,9 @@
+{
+  "scaleUpTimeSec": 54.170735708,
+  "scaleDownTimeSec": 120.064738541,
+  "maxReplicas": 4,
+  "avgKVCacheUsage": 0.16746031746031748,
+  "avgQueueDepth": 6.971031746031747,
+  "replicaOscillation": 0.6236095644623237,
+  "totalDurationSec": 474.569093084
+}

@@ -188,5 +188,5 @@ func captureResultsAndGrafana(results *BenchmarkResults, scenarioStart time.Time
 // gatewayTargetURL returns the full URL for load generation through the Gateway stack.
 func gatewayTargetURL() string {
 	gwHost := fmt.Sprintf("%s.%s.svc.cluster.local", benchCfg.GatewayServiceName, benchCfg.LLMDNamespace)
-	return fmt.Sprintf("http://%s:%d/v1", gwHost, benchCfg.GatewayServicePort)
+	return fmt.Sprintf("http://%s:%d/v1/completions", gwHost, benchCfg.GatewayServicePort)
 }

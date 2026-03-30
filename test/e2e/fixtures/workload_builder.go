@@ -545,7 +545,7 @@ func CreateGuideLLMJobWithArgs(
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							Command:         []string{"sh", "-c"},
 							Args: []string{
-								"guidellm " + strings.Join(args, " ") + " && echo '=== BENCHMARK JSON ===' && cat /tmp/benchmarks.json",
+								"echo 'Waiting 30s for gateway routing to propagate...' && sleep 30 && guidellm " + strings.Join(args, " ") + " && echo '=== BENCHMARK JSON ===' && cat /tmp/benchmarks.json",
 							},
 							Env: []corev1.EnvVar{
 								{Name: "HF_HOME", Value: "/tmp"},

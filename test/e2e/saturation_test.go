@@ -145,7 +145,7 @@ var _ = Describe("Saturation Mode - Single VariantAutoscaling", Label("full"), O
 			err = fixtures.EnsureScaledObject(ctx, crClient, cfg.LLMDNamespace, hpaName, deploymentName, vaName, minReplicas, 10, cfg.MonitoringNS)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ScaledObject")
 		} else {
-			err = fixtures.EnsureHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaName, deploymentName, vaName, minReplicas, 10)
+			err = fixtures.EnsureHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaName, deploymentName, vaName, minReplicas, 10, nil)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create HPA")
 		}
 	})
@@ -389,9 +389,9 @@ var _ = Describe("Saturation Mode - Multiple VariantAutoscalings", Label("full")
 			err = fixtures.EnsureScaledObject(ctx, crClient, cfg.LLMDNamespace, hpaB, modelServiceB+"-decode", vaB, 1, 10, cfg.MonitoringNS)
 			Expect(err).NotTo(HaveOccurred())
 		} else {
-			err = fixtures.EnsureHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaA, modelServiceA+"-decode", vaA, 1, 10)
+			err = fixtures.EnsureHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaA, modelServiceA+"-decode", vaA, 1, 10, nil)
 			Expect(err).NotTo(HaveOccurred())
-			err = fixtures.EnsureHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaB, modelServiceB+"-decode", vaB, 1, 10)
+			err = fixtures.EnsureHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaB, modelServiceB+"-decode", vaB, 1, 10, nil)
 			Expect(err).NotTo(HaveOccurred())
 		}
 	})

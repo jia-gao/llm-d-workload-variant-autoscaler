@@ -189,7 +189,7 @@ var _ = Describe("Parallel Load Scale-Up Test", Label("full"), Ordered, func() {
 				_ = fixtures.DeleteScaledObject(ctx, crClient, cfg.LLMDNamespace, hpaName)
 			})
 		} else {
-			err = fixtures.EnsureHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaName, deploymentName, vaName, minReplicas, 10)
+			err = fixtures.EnsureHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaName, deploymentName, vaName, minReplicas, 10, nil)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create HPA")
 			DeferCleanup(func() {
 				hpaNameFull := hpaName + "-hpa"

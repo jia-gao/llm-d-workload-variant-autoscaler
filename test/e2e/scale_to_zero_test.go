@@ -119,7 +119,7 @@ var _ = Describe("Scale-To-Zero Feature", Label("full", "flaky"), Ordered, func(
 			err = fixtures.EnsureScaledObject(ctx, crClient, cfg.LLMDNamespace, hpaName, deploymentName, vaName, 0, 10, cfg.MonitoringNS)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ScaledObject with scale-to-zero")
 		} else {
-			err = fixtures.EnsureHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaName, deploymentName, vaName, 0, 10)
+			err = fixtures.EnsureHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaName, deploymentName, vaName, 0, 10, nil)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create HPA with scale-to-zero")
 		}
 
@@ -385,7 +385,7 @@ enable_scale_to_zero: false`, cfg.ModelID),
 			err = fixtures.EnsureScaledObject(ctx, crClient, cfg.LLMDNamespace, hpaName, modelServiceName+"-decode", vaName, 1, 10, cfg.MonitoringNS)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ScaledObject")
 		} else {
-			err = fixtures.EnsureHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaName, modelServiceName+"-decode", vaName, 1, 10)
+			err = fixtures.EnsureHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaName, modelServiceName+"-decode", vaName, 1, 10, nil)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create HPA")
 		}
 

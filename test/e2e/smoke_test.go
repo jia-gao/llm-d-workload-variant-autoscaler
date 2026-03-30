@@ -210,7 +210,7 @@ var _ = Describe("Smoke Tests - Infrastructure Readiness", Label("smoke", "full"
 				err = fixtures.EnsureScaledObject(ctx, crClient, cfg.LLMDNamespace, hpaName, deploymentName, vaName, minReplicas, 10, cfg.MonitoringNS)
 				Expect(err).NotTo(HaveOccurred(), "Failed to create ScaledObject")
 			} else {
-				err = fixtures.EnsureHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaName, deploymentName, vaName, minReplicas, 10)
+				err = fixtures.EnsureHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaName, deploymentName, vaName, minReplicas, 10, nil)
 				Expect(err).NotTo(HaveOccurred(), "Failed to create HPA")
 			}
 		})

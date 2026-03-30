@@ -152,7 +152,7 @@ var _ = Describe("Scale-From-Zero Feature", Label("smoke", "full"), Ordered, fun
 			err = fixtures.EnsureScaledObject(ctx, crClient, cfg.LLMDNamespace, hpaName, modelServiceName+"-decode", vaName, 0, 10, cfg.MonitoringNS)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ScaledObject with scale-to-zero")
 		} else {
-			err = fixtures.EnsureHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaName, modelServiceName+"-decode", vaName, 0, 10)
+			err = fixtures.EnsureHPA(ctx, k8sClient, cfg.LLMDNamespace, hpaName, modelServiceName+"-decode", vaName, 0, 10, nil)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create HPA with scale-to-zero")
 		}
 

@@ -513,7 +513,7 @@ func CreateGuideLLMJobWithArgs(
 		"--profile", "poisson",
 		"--rate", "20",
 		"--max-seconds", "600",
-		"--request-type", "completions",
+		"--request-type", "text_completions",
 		"--data", "prompt_tokens=4000,output_tokens=1000",
 		"--output-path", "/tmp/benchmarks.json",
 	}

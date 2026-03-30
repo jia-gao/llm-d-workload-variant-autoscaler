@@ -136,7 +136,7 @@ data:
 	Context("HPA Baseline", func() {
 		It("should run the prefill heavy workload against standard HPA", func() {
 			By("Setting up EPP Configuration with Flow Control")
-			err := fixtures.EnsureEndpointPickerConfig(ctx, crClient, benchCfg.LLMDNamespace, res.PoolName)
+			err := fixtures.EnsureEndpointPickerConfig(ctx, crClient, benchCfg.LLMDNamespace, benchCfg.EPPServiceName)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create EndpointPickerConfig")
 
 			By("Creating model service deployment")
@@ -162,7 +162,7 @@ data:
 	Context("WVA", func() {
 		It("should run the prefill heavy workload against WVA", func() {
 			By("Setting up EPP Configuration with Flow Control")
-			err := fixtures.EnsureEndpointPickerConfig(ctx, crClient, benchCfg.LLMDNamespace, res.PoolName)
+			err := fixtures.EnsureEndpointPickerConfig(ctx, crClient, benchCfg.LLMDNamespace, benchCfg.EPPServiceName)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create EndpointPickerConfig")
 
 			By("Creating model service deployment")

@@ -180,12 +180,11 @@ data:
 				benchCfg.ModelID, benchCfg.Accelerator, 30.0, benchCfg.ControllerInstance,
 				fixtures.WithMinReplicas(1),
 				fixtures.WithMaxReplicas(10),
-				fixtures.WithBehavior(behavior),
 			)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create VA")
 
 			By("Creating HPA for the deployment")
-			err = fixtures.EnsureHPA(ctx, k8sClient, benchCfg.LLMDNamespace, res.HPAName, res.DeploymentName, res.VAName, 1, 10)
+			err = fixtures.EnsureHPA(ctx, k8sClient, benchCfg.LLMDNamespace, res.HPAName, res.DeploymentName, res.VAName, 1, 10, behavior)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create HPA")
 
 			runPrefillBenchmark("WVA")

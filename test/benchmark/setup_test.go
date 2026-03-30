@@ -83,7 +83,7 @@ func setupBenchmarkScenario(res ScenarioResources) {
 	})
 
 	By("Creating HPA for the deployment")
-	err = fixtures.EnsureHPA(ctx, k8sClient, benchCfg.LLMDNamespace, res.HPAName, res.DeploymentName, res.VAName, 1, 10)
+			err = fixtures.EnsureHPA(ctx, k8sClient, benchCfg.LLMDNamespace, res.HPAName, res.DeploymentName, res.VAName, 1, 10, nil)
 	Expect(err).NotTo(HaveOccurred(), "Failed to create HPA")
 
 	DeferCleanup(func() {

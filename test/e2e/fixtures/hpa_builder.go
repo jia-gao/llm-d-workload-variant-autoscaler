@@ -6,6 +6,7 @@ import (
 	"time"
 
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,8 +21,12 @@ func EnsureHPA(
 	k8sClient *kubernetes.Clientset,
 	namespace, name, deploymentName, vaName string,
 	minReplicas, maxReplicas int32,
+	behavior *autoscalingv2.HorizontalPodAutoscalerBehavior,
 ) error {
 	hpa := buildHPA(namespace, name, deploymentName, vaName, minReplicas, maxReplicas)
+	if behavior != nil {
+		hpa.Spec.Behavior = behavior
+	}
 	return applyHPA(ctx, k8sClient, namespace, hpa)
 }
 
@@ -131,10 +136,10 @@ func buildHPA(namespace, name, deploymentName, vaName string, minReplicas, maxRe
 			Behavior: &autoscalingv2.HorizontalPodAutoscalerBehavior{
 				ScaleUp: &autoscalingv2.HPAScalingRules{
 					StabilizationWindowSeconds: ptr.To(int32(0)),
-					Policies:                   []autoscalingv2.HPAScalingPolicy{{Type: autoscalingv2.PodsScalingPolicy, Value: 10, PeriodSeconds: 150}},
+					Policies:                   []autoscalingv2.HPAScalingPolicy{{Type: autoscalingv2.PodsScalingPolicy, Value: 10, PeriodSeconds: 15}},
 				},
 				ScaleDown: &autoscalingv2.HPAScalingRules{
-					StabilizationWindowSeconds: ptr.To(int32(240)),
+					StabilizationWindowSeconds: ptr.To(int32(60)),
 					Policies:                   []autoscalingv2.HPAScalingPolicy{{Type: autoscalingv2.PodsScalingPolicy, Value: 1, PeriodSeconds: 60}},
 				},
 			},

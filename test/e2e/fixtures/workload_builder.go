@@ -81,6 +81,16 @@ func CreateLoadJob(
 									Name:  "HF_HOME",
 									Value: "/tmp",
 								},
+								{
+									Name: "HF_TOKEN",
+									ValueFrom: &corev1.EnvVarSource{
+										SecretKeyRef: &corev1.SecretKeySelector{
+											LocalObjectReference: corev1.LocalObjectReference{Name: "llm-d-hf-token"},
+											Key:                  "HF_TOKEN",
+											Optional:             ptr.To(true),
+										},
+									},
+								},
 							},
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
@@ -548,6 +558,16 @@ func CreateGuideLLMJobWithProfile(
 							},
 							Env: []corev1.EnvVar{
 								{Name: "HF_HOME", Value: "/tmp"},
+								{
+									Name: "HF_TOKEN",
+									ValueFrom: &corev1.EnvVarSource{
+										SecretKeyRef: &corev1.SecretKeySelector{
+											LocalObjectReference: corev1.LocalObjectReference{Name: "llm-d-hf-token"},
+											Key:                  "HF_TOKEN",
+											Optional:             ptr.To(true),
+										},
+									},
+								},
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{

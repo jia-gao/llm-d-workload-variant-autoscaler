@@ -145,3 +145,10 @@ func buildVariantAutoscaling(namespace, name, deploymentName, modelID, accelerat
 	}
 	return va
 }
+
+// WithBehavior sets the Behavior field on the VA spec.
+func WithBehavior(behavior *autoscalingv2.HorizontalPodAutoscalerBehavior) VAOption {
+	return func(va *variantautoscalingv1alpha1.VariantAutoscaling) {
+		va.Spec.Behavior = behavior
+	}
+}

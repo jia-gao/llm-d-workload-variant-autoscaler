@@ -486,3 +486,105 @@ func DeleteParallelLoadJobs(
 		}
 	}
 }
+
+// CreateGuideLLMJobWithProfile creates a ConfigMap with the provided YAML profile
+// and launches a GuideLLM Job that mounts and uses this profile.
+func CreateGuideLLMJobWithProfile(
+	ctx context.Context,
+	k8sClient *kubernetes.Clientset,
+	namespace, name, targetServiceURL, modelID, profileYAML string,
+) error {
+	// 1. Create ConfigMap for the profile
+	cmName := name + "-guidellm-profile"
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cmName,
+			Namespace: namespace,
+		},
+		Data: map[string]string{
+			"profile.yaml": profileYAML,
+		},
+	}
+
+	// Clean up existing ConfigMap if it exists
+	_ = k8sClient.CoreV1().ConfigMaps(namespace).Delete(ctx, cmName, metav1.DeleteOptions{})
+
+	_, err := k8sClient.CoreV1().ConfigMaps(namespace).Create(ctx, cm, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to create configmap: %w", err)
+	}
+
+	// 2. Create the Job
+	image := "ghcr.io/vllm-project/guidellm:latest"
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name + "-load",
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app":           name + "-load",
+				"test-resource": "true",
+			},
+		},
+		Spec: batchv1.JobSpec{
+			BackoffLimit: ptr.To(int32(0)),
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"app":           name + "-load",
+						"test-resource": "true",
+					},
+				},
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers: []corev1.Container{
+						{
+							Name:            "load-gen",
+							Image:           image,
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Command:         []string{"sh", "-c"},
+							Args: []string{
+								"guidellm benchmark --target " + targetServiceURL + " --model " + modelID + " --config /config/profile.yaml --output-path /tmp/benchmarks.json && echo '=== BENCHMARK JSON ===' && cat /tmp/benchmarks.json",
+							},
+							Env: []corev1.EnvVar{
+								{Name: "HF_HOME", Value: "/tmp"},
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      "config-volume",
+									MountPath: "/config",
+								},
+							},
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("1"),
+									corev1.ResourceMemory: resource.MustParse("1Gi"),
+								},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "config-volume",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: cmName,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Clean up existing job if it exists
+	_ = k8sClient.BatchV1().Jobs(namespace).Delete(ctx, name+"-load", metav1.DeleteOptions{
+		PropagationPolicy: ptr.To(metav1.DeletePropagationBackground),
+	})
+
+	_, createErr := k8sClient.BatchV1().Jobs(namespace).Create(ctx, job, metav1.CreateOptions{})
+	return createErr
+}

@@ -17,10 +17,9 @@ import (
 
 var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"), func() {
 	var (
-		ctx       context.Context
-		cancel    context.CancelFunc
-		res       ScenarioResources
-		startTime time.Time
+		ctx    context.Context
+		cancel context.CancelFunc
+		res    ScenarioResources
 	)
 
 	const (
@@ -38,8 +37,15 @@ data:
 
 	BeforeEach(func() {
 		ctx, cancel = context.WithCancel(context.Background())
-		res = generateScenarioResources("prefill-hpa")
-		startTime = time.Now()
+		res = ScenarioResources{
+			PoolName:       "prefill-pool",
+			ModelService:   "prefill-ms",
+			DeploymentName: "prefill-ms-decode",
+			ServiceName:    "prefill-ms-service",
+			VAName:         "prefill-va",
+			HPAName:        "prefill-hpa",
+			JobBaseName:    "prefill-ms",
+		}
 	})
 
 	AfterEach(func() {
@@ -56,7 +62,7 @@ data:
 
 		By("Launching GuideLLM Load Generator")
 		targetURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d/v1/completions",
-			benchCfg.GatewayService, benchCfg.LLMDNamespace, benchCfg.GatewayPort)
+			benchCfg.GatewayServiceName, benchCfg.LLMDNamespace, benchCfg.GatewayServicePort)
 
 		err := fixtures.CreateGuideLLMJobWithProfile(
 			ctx, k8sClient, benchCfg.LLMDNamespace, res.ModelService,
@@ -177,7 +183,7 @@ data:
 
 			err = fixtures.EnsureVariantAutoscaling(
 				ctx, crClient, benchCfg.LLMDNamespace, res.VAName, res.DeploymentName,
-				benchCfg.ModelID, benchCfg.Accelerator, 30.0, benchCfg.ControllerInstance,
+				benchCfg.ModelID, benchCfg.AcceleratorType, 30.0, benchCfg.ControllerInstance,
 				fixtures.WithMinReplicas(1),
 				fixtures.WithMaxReplicas(10),
 			)

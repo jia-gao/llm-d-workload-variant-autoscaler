@@ -143,7 +143,7 @@ jobs:
           echo "Checkout will use PR head SHA: ${{ needs.gate.outputs.pr_head_sha }}"
 
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ needs.gate.outputs.pr_head_repo || github.repository }}
           ref: ${{ needs.gate.outputs.pr_head_sha }}

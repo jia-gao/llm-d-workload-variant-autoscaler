@@ -497,35 +497,25 @@ func DeleteParallelLoadJobs(
 	}
 }
 
-// CreateGuideLLMJobWithProfile creates a ConfigMap with the provided YAML profile
-// and launches a GuideLLM Job that mounts and uses this profile.
-func CreateGuideLLMJobWithProfile(
+// CreateGuideLLMJobWithArgs launches a GuideLLM Job with the specified arguments.
+func CreateGuideLLMJobWithArgs(
 	ctx context.Context,
 	k8sClient *kubernetes.Clientset,
-	namespace, name, targetServiceURL, modelID, profileYAML string,
+	namespace, name, targetServiceURL, modelID string,
 ) error {
-	// 1. Create ConfigMap for the profile
-	cmName := name + "-guidellm-profile"
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      cmName,
-			Namespace: namespace,
-		},
-		Data: map[string]string{
-			"profile.yaml": profileYAML,
-		},
-	}
-
-	// Clean up existing ConfigMap if it exists
-	_ = k8sClient.CoreV1().ConfigMaps(namespace).Delete(ctx, cmName, metav1.DeleteOptions{})
-
-	_, err := k8sClient.CoreV1().ConfigMaps(namespace).Create(ctx, cm, metav1.CreateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to create configmap: %w", err)
-	}
-
-	// 2. Create the Job
 	image := "ghcr.io/vllm-project/guidellm:latest"
+
+	args := []string{
+		"benchmark",
+		"--target", targetServiceURL,
+		"--model", modelID,
+		"--profile", "poisson",
+		"--rate", "20",
+		"--max-seconds", "600",
+		"--request-type", "completions",
+		"--data", "prompt_tokens=4000,output_tokens=1000",
+		"--output-path", "/tmp/benchmarks.json",
+	}
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -554,7 +544,7 @@ func CreateGuideLLMJobWithProfile(
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							Command:         []string{"sh", "-c"},
 							Args: []string{
-								"guidellm benchmark --target " + targetServiceURL + " --model " + modelID + " --config /config/profile.yaml --output-path /tmp/benchmarks.json && echo '=== BENCHMARK JSON ===' && cat /tmp/benchmarks.json",
+								"guidellm " + strings.Join(args, " ") + " && echo '=== BENCHMARK JSON ===' && cat /tmp/benchmarks.json",
 							},
 							Env: []corev1.EnvVar{
 								{Name: "HF_HOME", Value: "/tmp"},
@@ -569,28 +559,10 @@ func CreateGuideLLMJobWithProfile(
 									},
 								},
 							},
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      "config-volume",
-									MountPath: "/config",
-								},
-							},
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
 									corev1.ResourceCPU:    resource.MustParse("1"),
 									corev1.ResourceMemory: resource.MustParse("1Gi"),
-								},
-							},
-						},
-					},
-					Volumes: []corev1.Volume{
-						{
-							Name: "config-volume",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: cmName,
-									},
 								},
 							},
 						},

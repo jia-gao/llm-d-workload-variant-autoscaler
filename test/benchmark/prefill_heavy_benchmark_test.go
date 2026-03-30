@@ -22,18 +22,10 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 		res    ScenarioResources
 	)
 
-	const (
-		// The exact YAML profile provided for the prefill heavy workload
-		prefillHeavyProfileYAML = `
-profile: poisson
-request_type: text_completions
-rate: 20
-max_seconds: 600
-data:
-  prompt_tokens: 4000
-  output_tokens: 1000
-`
-	)
+	// We don't need this anymore since we pass args directly
+	// const (
+	// 	prefillHeavyProfileYAML = ...
+	// )
 
 	BeforeEach(func() {
 		ctx, cancel = context.WithCancel(context.Background())
@@ -61,12 +53,12 @@ data:
 		}, 15*time.Minute, 5*time.Second).Should(Succeed())
 
 		By("Launching GuideLLM Load Generator")
-		targetURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d/v1/completions",
+		targetURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d",
 			benchCfg.GatewayServiceName, benchCfg.LLMDNamespace, benchCfg.GatewayServicePort)
 
-		err := fixtures.CreateGuideLLMJobWithProfile(
+		err := fixtures.CreateGuideLLMJobWithArgs(
 			ctx, k8sClient, benchCfg.LLMDNamespace, res.ModelService,
-			targetURL, benchCfg.ModelID, prefillHeavyProfileYAML,
+			targetURL, benchCfg.ModelID,
 		)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create GuideLLM load job")
 

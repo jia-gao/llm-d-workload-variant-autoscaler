@@ -74,7 +74,17 @@ data:
 		jobName := res.ModelService + "-load"
 
 		By("Waiting for GuideLLM job to complete (this will take ~10 minutes)")
+		
+		// If the job fails, we want to print the logs to see why it failed before asserting
 		err = fixtures.WaitForJobCompletion(ctx, k8sClient, benchCfg.LLMDNamespace, jobName, 15*time.Minute)
+		if err != nil {
+			logs, logErr := fixtures.GetJobPodLogs(ctx, k8sClient, benchCfg.LLMDNamespace, jobName)
+			if logErr == nil {
+				GinkgoWriter.Printf("\n--- GuideLLM Job Failed. Pod Logs ---\n%s\n---------------------------\n", logs)
+			} else {
+				GinkgoWriter.Printf("\n--- GuideLLM Job Failed. Could not fetch logs: %v ---\n", logErr)
+			}
+		}
 		Expect(err).NotTo(HaveOccurred(), "GuideLLM job failed or timed out")
 		loadEnd := time.Now()
 

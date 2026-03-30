@@ -30,7 +30,7 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 	BeforeEach(func() {
 		ctx, cancel = context.WithCancel(context.Background())
 		res = ScenarioResources{
-			PoolName:       "prefill-pool",
+			PoolName:       benchCfg.PoolName,
 			ModelService:   "prefill-ms",
 			DeploymentName: "prefill-ms-decode",
 			ServiceName:    "prefill-ms-service",
@@ -145,6 +145,14 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 			err = fixtures.EnsureModelService(ctx, k8sClient, benchCfg.LLMDNamespace, res.ModelService, res.PoolName, benchCfg.ModelID, benchCfg.UseSimulator, benchCfg.MaxNumSeqs)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create model service")
 
+			By("Creating service to expose model server")
+			err = fixtures.EnsureService(ctx, k8sClient, benchCfg.LLMDNamespace, res.ModelService, res.DeploymentName, 8000)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create service")
+
+			By("Creating ServiceMonitor for metrics scraping")
+			err = fixtures.EnsureServiceMonitor(ctx, crClient, benchCfg.MonitoringNS, benchCfg.LLMDNamespace, res.ModelService, res.DeploymentName)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ServiceMonitor")
+
 			By("Creating standard HPA (Scale Up: 0, Scale Down: 240)")
 			scaleUpPolicies := []autoscalingv2.HPAScalingPolicy{{Type: autoscalingv2.PercentScalingPolicy, Value: 100, PeriodSeconds: 15}}
 			scaleDownPolicies := []autoscalingv2.HPAScalingPolicy{{Type: autoscalingv2.PercentScalingPolicy, Value: 100, PeriodSeconds: 15}} // Default fallback
@@ -170,6 +178,14 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 			By("Creating model service deployment")
 			err = fixtures.EnsureModelService(ctx, k8sClient, benchCfg.LLMDNamespace, res.ModelService, res.PoolName, benchCfg.ModelID, benchCfg.UseSimulator, benchCfg.MaxNumSeqs)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create model service")
+
+			By("Creating service to expose model server")
+			err = fixtures.EnsureService(ctx, k8sClient, benchCfg.LLMDNamespace, res.ModelService, res.DeploymentName, 8000)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create service")
+
+			By("Creating ServiceMonitor for metrics scraping")
+			err = fixtures.EnsureServiceMonitor(ctx, crClient, benchCfg.MonitoringNS, benchCfg.LLMDNamespace, res.ModelService, res.DeploymentName)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ServiceMonitor")
 
 			By("Creating VariantAutoscaling resource (Scale Up: 0, Scale Down: 240)")
 			behavior := &autoscalingv2.HorizontalPodAutoscalerBehavior{

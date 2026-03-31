@@ -78,6 +78,37 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 		time.Sleep(3 * time.Second)
 	}
 
+	// scaleDownOtherDecodeDeployments scales any decode deployments that aren't ours to 0 replicas.
+	// This ensures the EPP only routes to our prefill-ms-decode pods with the correct max-model-len.
+	scaleDownOtherDecodeDeployments := func() {
+		By("Scaling down other decode deployments in the pool")
+		deployments, err := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			GinkgoWriter.Printf("Warning: could not list deployments: %v\n", err)
+			return
+		}
+		zero := int32(0)
+		for i := range deployments.Items {
+			d := &deployments.Items[i]
+			if d.Name == res.DeploymentName {
+				continue
+			}
+			if !strings.HasSuffix(d.Name, "-decode") {
+				continue
+			}
+			if d.Spec.Replicas != nil && *d.Spec.Replicas == 0 {
+				continue
+			}
+			GinkgoWriter.Printf("  Scaling down %s from %d to 0 replicas\n", d.Name, *d.Spec.Replicas)
+			d.Spec.Replicas = &zero
+			_, updateErr := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Update(ctx, d, metav1.UpdateOptions{})
+			if updateErr != nil {
+				GinkgoWriter.Printf("  Warning: failed to scale down %s: %v\n", d.Name, updateErr)
+			}
+		}
+		time.Sleep(5 * time.Second)
+	}
+
 	// waitForVAAndMetrics waits for the VA to stabilize, external metrics to be available,
 	// and Prometheus to scrape vLLM metrics. This is essential for WVA to be able to scale.
 	waitForVAAndMetrics := func() {
@@ -121,6 +152,33 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(deployment.Status.ReadyReplicas).To(BeNumerically(">=", 1), "Deployment should have at least 1 ready replica")
 		}, 15*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("Listing all decode deployments in namespace (diagnostics)")
+		deployments, _ := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{})
+		if deployments != nil {
+			for i := range deployments.Items {
+				d := &deployments.Items[i]
+				if strings.HasSuffix(d.Name, "-decode") || strings.Contains(d.Name, "decode") {
+					ready := d.Status.ReadyReplicas
+					spec := int32(0)
+					if d.Spec.Replicas != nil {
+						spec = *d.Spec.Replicas
+					}
+					GinkgoWriter.Printf("  Decode deployment: %s (spec=%d, ready=%d)\n", d.Name, spec, ready)
+				}
+			}
+		}
+
+		By("Verifying Gateway connectivity with a small test request")
+		targetURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d",
+			benchCfg.GatewayServiceName, benchCfg.LLMDNamespace, benchCfg.GatewayServicePort)
+		err := fixtures.VerifyGatewayConnectivity(ctx, k8sClient, benchCfg.LLMDNamespace, targetURL, benchCfg.ModelID)
+		if err != nil {
+			GinkgoWriter.Printf("WARNING: Gateway connectivity check failed: %v\n", err)
+			GinkgoWriter.Println("Proceeding anyway - GuideLLM will report actual errors")
+		} else {
+			GinkgoWriter.Println("Gateway connectivity verified - test request succeeded")
+		}
 
 		By("Checking Prometheus metric availability before load")
 		for _, q := range []string{
@@ -317,6 +375,7 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 	Context("HPA Baseline", func() {
 		It("should run the prefill heavy workload against standard HPA", func() {
 			cleanupAutoscalers()
+			scaleDownOtherDecodeDeployments()
 
 			By("Setting up EPP Configuration with Flow Control")
 			err := fixtures.EnsureEndpointPickerConfig(ctx, crClient, benchCfg.LLMDNamespace, benchCfg.EPPServiceName)
@@ -353,6 +412,7 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 	Context("WVA", func() {
 		It("should run the prefill heavy workload against WVA", func() {
 			cleanupAutoscalers()
+			scaleDownOtherDecodeDeployments()
 
 			By("Setting up EPP Configuration with Flow Control")
 			err := fixtures.EnsureEndpointPickerConfig(ctx, crClient, benchCfg.LLMDNamespace, benchCfg.EPPServiceName)

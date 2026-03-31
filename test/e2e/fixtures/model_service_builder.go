@@ -84,7 +84,7 @@ func buildModelServiceDeployment(namespace, name, poolName, modelID string, useS
 	appLabel := name + "-decode"
 	image := "ghcr.io/llm-d/llm-d-inference-sim:v0.7.1"
 	if !useSimulator {
-		image = "ghcr.io/llm-d/llm-d-cuda-dev:latest"
+		image = "ghcr.io/llm-d/llm-d-cuda:v0.3.0"
 	}
 	args := buildModelServerArgs(modelID, useSimulator, maxNumSeqs)
 	labels := map[string]string{
@@ -269,12 +269,10 @@ func buildModelServerArgs(modelID string, useSimulator bool, maxNumSeqs int) []s
 		}
 	}
 	return []string{
+		"--port", "8000",
 		"--model", modelID,
-		"--max-num-seqs", fmt.Sprintf("%d", maxNumSeqs),
-		"--max-model-len", "6144",
 		"--served-model-name", modelID,
-		"--disable-log-requests",
 		"--enforce-eager",
-		"--gpu-memory-utilization", "0.95",
+		fmt.Sprintf("--max-num-seqs=%d", maxNumSeqs),
 	}
 }

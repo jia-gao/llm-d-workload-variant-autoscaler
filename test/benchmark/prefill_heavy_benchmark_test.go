@@ -11,6 +11,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -147,11 +148,11 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 
 	runPrefillBenchmark := func(autoscalerType string) {
 		By("Waiting for deployment to be ready (with pod health diagnostics)")
+		var lastLogDump int32
 		Eventually(func(g Gomega) {
 			deployment, err := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Get(ctx, res.DeploymentName, metav1.GetOptions{})
 			g.Expect(err).NotTo(HaveOccurred())
 
-			// Print pod-level diagnostics on every check to detect CrashLoopBackOff
 			pods, podErr := k8sClient.CoreV1().Pods(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{
 				LabelSelector: fmt.Sprintf("app=%s", res.DeploymentName),
 			})
@@ -168,6 +169,21 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 						} else if cs.State.Running != nil {
 							GinkgoWriter.Printf("  Pod %s: RUNNING ready=%v restarts=%d\n",
 								p.Name, cs.Ready, cs.RestartCount)
+						}
+						// Dump previous container logs once after first crash to see why it died
+						if cs.RestartCount > 0 && cs.RestartCount > lastLogDump {
+							lastLogDump = cs.RestartCount
+							logOpts := &corev1.PodLogOptions{Container: cs.Name, Previous: true, TailLines: ptr.To(int64(50))}
+							req := k8sClient.CoreV1().Pods(benchCfg.LLMDNamespace).GetLogs(p.Name, logOpts)
+							logStream, logErr := req.Stream(ctx)
+							if logErr == nil {
+								buf := make([]byte, 8192)
+								n, _ := logStream.Read(buf)
+								logStream.Close()
+								if n > 0 {
+									GinkgoWriter.Printf("\n--- CRASHED CONTAINER LOGS (previous, tail 50) ---\n%s\n--- END LOGS ---\n\n", string(buf[:n]))
+								}
+							}
 						}
 					}
 				}

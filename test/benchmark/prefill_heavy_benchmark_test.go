@@ -207,8 +207,6 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 		}
 
 		By("Launching GuideLLM Load Generator")
-		targetURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d",
-			benchCfg.GatewayServiceName, benchCfg.LLMDNamespace, benchCfg.GatewayServicePort)
 
 		err = fixtures.CreateGuideLLMJobWithArgs(
 			ctx, k8sClient, benchCfg.LLMDNamespace, res.ModelService,

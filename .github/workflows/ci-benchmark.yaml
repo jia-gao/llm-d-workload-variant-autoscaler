@@ -1,8 +1,12 @@
 name: CI - Benchmark
 run-name: >-
-  Benchmark (${{ github.event_name == 'workflow_dispatch' && inputs.platform || 'pr-comment' }})
-  on ${{ github.ref_name }}
-  — ${{ github.event.head_commit.message || github.event.inputs.platform || '' }}
+  ${{ github.event_name == 'workflow_dispatch'
+    && format('Benchmark: {0} | {1}',
+        inputs.platform,
+        github.ref_name)
+    || format('Benchmark: PR #{0} | {1}',
+        github.event.issue.number,
+        github.event.comment.body) }}
 
 concurrency:
   group: >-

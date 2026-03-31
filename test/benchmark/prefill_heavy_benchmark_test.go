@@ -146,12 +146,35 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 	}
 
 	runPrefillBenchmark := func(autoscalerType string) {
-		By("Waiting for deployment to be ready")
+		By("Waiting for deployment to be ready (with pod health diagnostics)")
 		Eventually(func(g Gomega) {
 			deployment, err := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Get(ctx, res.DeploymentName, metav1.GetOptions{})
 			g.Expect(err).NotTo(HaveOccurred())
+
+			// Print pod-level diagnostics on every check to detect CrashLoopBackOff
+			pods, podErr := k8sClient.CoreV1().Pods(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{
+				LabelSelector: fmt.Sprintf("app=%s", res.DeploymentName),
+			})
+			if podErr == nil {
+				for i := range pods.Items {
+					p := &pods.Items[i]
+					for _, cs := range p.Status.ContainerStatuses {
+						if cs.State.Waiting != nil {
+							GinkgoWriter.Printf("  Pod %s: WAITING reason=%s message=%s restarts=%d\n",
+								p.Name, cs.State.Waiting.Reason, cs.State.Waiting.Message, cs.RestartCount)
+						} else if cs.State.Terminated != nil {
+							GinkgoWriter.Printf("  Pod %s: TERMINATED reason=%s exitCode=%d restarts=%d\n",
+								p.Name, cs.State.Terminated.Reason, cs.State.Terminated.ExitCode, cs.RestartCount)
+						} else if cs.State.Running != nil {
+							GinkgoWriter.Printf("  Pod %s: RUNNING ready=%v restarts=%d\n",
+								p.Name, cs.Ready, cs.RestartCount)
+						}
+					}
+				}
+			}
+
 			g.Expect(deployment.Status.ReadyReplicas).To(BeNumerically(">=", 1), "Deployment should have at least 1 ready replica")
-		}, 15*time.Minute, 5*time.Second).Should(Succeed())
+		}, 15*time.Minute, 10*time.Second).Should(Succeed())
 
 		By("Listing all decode deployments in namespace (diagnostics)")
 		deployments, _ := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{})
@@ -173,12 +196,7 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 		targetURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d",
 			benchCfg.GatewayServiceName, benchCfg.LLMDNamespace, benchCfg.GatewayServicePort)
 		err := fixtures.VerifyGatewayConnectivity(ctx, k8sClient, benchCfg.LLMDNamespace, targetURL, benchCfg.ModelID)
-		if err != nil {
-			GinkgoWriter.Printf("WARNING: Gateway connectivity check failed: %v\n", err)
-			GinkgoWriter.Println("Proceeding anyway - GuideLLM will report actual errors")
-		} else {
-			GinkgoWriter.Println("Gateway connectivity verified - test request succeeded")
-		}
+		Expect(err).NotTo(HaveOccurred(), "Gateway connectivity check failed — backend is not reachable, aborting benchmark")
 
 		By("Checking Prometheus metric availability before load")
 		for _, q := range []string{
@@ -252,6 +270,27 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 					}
 					timeline = append(timeline, ReplicaSnap{ElapsedSec: elapsed, SpecReplicas: spec, ReadyReplicas: ready})
 					GinkgoWriter.Printf("  [%.0fs] replicas: spec=%d ready=%d\n", elapsed, spec, ready)
+				}
+
+				// Pod-level health check for crash detection
+				pods, podErr := k8sClient.CoreV1().Pods(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{
+					LabelSelector: fmt.Sprintf("app=%s", res.DeploymentName),
+				})
+				if podErr == nil {
+					for i := range pods.Items {
+						p := &pods.Items[i]
+						for _, cs := range p.Status.ContainerStatuses {
+							if cs.RestartCount > 0 {
+								reason := "running"
+								if cs.State.Waiting != nil {
+									reason = cs.State.Waiting.Reason
+								} else if cs.State.Terminated != nil {
+									reason = fmt.Sprintf("terminated(%s,exit=%d)", cs.State.Terminated.Reason, cs.State.Terminated.ExitCode)
+								}
+								GinkgoWriter.Printf("  [%.0fs] Pod %s: restarts=%d state=%s\n", elapsed, p.Name, cs.RestartCount, reason)
+							}
+						}
+					}
 				}
 
 				hpaList, hpaErr := k8sClient.AutoscalingV2().HorizontalPodAutoscalers(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{})

@@ -188,8 +188,14 @@ func buildModelServiceResources(useSimulator bool) corev1.ResourceRequirements {
 		}
 	}
 	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("2"),
+			corev1.ResourceMemory: resource.MustParse("16Gi"),
+		},
 		Limits: corev1.ResourceList{
-			"nvidia.com/gpu": resource.MustParse("1"),
+			corev1.ResourceCPU:    resource.MustParse("8"),
+			corev1.ResourceMemory: resource.MustParse("32Gi"),
+			"nvidia.com/gpu":      resource.MustParse("1"),
 		},
 	}
 }
@@ -235,8 +241,10 @@ func buildModelServerArgs(modelID string, useSimulator bool, maxNumSeqs int) []s
 	return []string{
 		"--model", modelID,
 		"--max-num-seqs", fmt.Sprintf("%d", maxNumSeqs),
-		"--max-model-len", "8192",
+		"--max-model-len", "6144",
 		"--served-model-name", modelID,
 		"--disable-log-requests",
+		"--enforce-eager",
+		"--gpu-memory-utilization", "0.95",
 	}
 }

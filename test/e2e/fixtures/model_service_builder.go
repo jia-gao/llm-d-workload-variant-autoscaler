@@ -235,7 +235,7 @@ func buildModelServerArgs(modelID string, useSimulator bool, maxNumSeqs int) []s
 	return []string{
 		"--model", modelID,
 		"--max-num-seqs", fmt.Sprintf("%d", maxNumSeqs),
-		"--max-model-len", "1024",
+		"--max-model-len", "8192",
 		"--served-model-name", modelID,
 		"--disable-log-requests",
 	}

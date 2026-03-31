@@ -223,11 +223,16 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 
 			var parsed map[string]interface{}
 			if jsonErr := json.Unmarshal([]byte(jsonStr), &parsed); jsonErr == nil {
-				extractNestedMetric(&parsed, "ttft", &ttftJSON)
-				extractNestedMetric(&parsed, "itl", &itlJSON)
-				extractNestedMetric(&parsed, "output_token_throughput", &throughputJSON)
-				if throughputJSON == nil {
-					extractNestedMetric(&parsed, "throughput", &throughputJSON)
+				// GuideLLM stores metrics at benchmarks[0].metrics.<metric_name>.successful
+				extractGuideLLMMetric(&parsed, "time_to_first_token_ms", &ttftJSON)
+				extractGuideLLMMetric(&parsed, "inter_token_latency_ms", &itlJSON)
+				extractGuideLLMMetric(&parsed, "output_tokens_per_second", &throughputJSON)
+
+				// Also extract request totals for diagnostics
+				var requestTotals json.RawMessage
+				extractGuideLLMMetric(&parsed, "request_totals", &requestTotals)
+				if requestTotals != nil {
+					GinkgoWriter.Printf("  Request Totals: %s\n", string(requestTotals))
 				}
 			} else {
 				GinkgoWriter.Printf("Warning: failed to parse GuideLLM JSON: %v\n", jsonErr)
@@ -396,35 +401,36 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 	})
 })
 
-// extractNestedMetric searches a GuideLLM result for a named metric across
-// benchmarks[].results[] and the top-level stats.
-func extractNestedMetric(parsed *map[string]interface{}, key string, out *json.RawMessage) {
-	if benchmarks, ok := (*parsed)["benchmarks"].([]interface{}); ok {
-		for _, b := range benchmarks {
-			bm, ok := b.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			if results, ok := bm["results"].(map[string]interface{}); ok {
-				if v, ok := results[key]; ok {
-					raw, _ := json.Marshal(v)
-					*out = raw
-					return
-				}
-			}
-			if stats, ok := bm["stats"].(map[string]interface{}); ok {
-				if v, ok := stats[key]; ok {
-					raw, _ := json.Marshal(v)
-					*out = raw
-					return
-				}
-			}
+// extractGuideLLMMetric extracts a metric from the GuideLLM JSON structure.
+// The structure is: benchmarks[0].metrics.<key>.successful (for successful request stats).
+// Falls back to benchmarks[0].metrics.<key> if "successful" sub-key doesn't exist.
+func extractGuideLLMMetric(parsed *map[string]interface{}, key string, out *json.RawMessage) {
+	benchmarks, ok := (*parsed)["benchmarks"].([]interface{})
+	if !ok || len(benchmarks) == 0 {
+		return
+	}
+	bm, ok := benchmarks[0].(map[string]interface{})
+	if !ok {
+		return
+	}
+	metrics, ok := bm["metrics"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	metricVal, ok := metrics[key]
+	if !ok {
+		return
+	}
+	metricMap, ok := metricVal.(map[string]interface{})
+	if ok {
+		if successful, ok := metricMap["successful"]; ok {
+			raw, _ := json.Marshal(successful)
+			*out = raw
+			return
 		}
 	}
-	if v, ok := (*parsed)[key]; ok {
-		raw, _ := json.Marshal(v)
-		*out = raw
-	}
+	raw, _ := json.Marshal(metricVal)
+	*out = raw
 }
 
 func truncateTail(s string, maxLen int) string {

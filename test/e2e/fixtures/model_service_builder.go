@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
 )
@@ -102,6 +103,33 @@ func buildModelServiceDeployment(namespace, name, poolName, modelID string, useS
 	var volumes []corev1.Volume
 	var volumeMounts []corev1.VolumeMount
 
+	// Real vLLM needs probes — model loading takes minutes; without a readiness probe
+	// the pod is marked "ready" immediately while the HTTP server isn't listening yet.
+	var readinessProbe, livenessProbe *corev1.Probe
+	if !useSimulator {
+		healthProbe := corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/health",
+				Port: intstr.FromInt32(8000),
+			},
+		}
+		readinessProbe = &corev1.Probe{
+			ProbeHandler:        healthProbe,
+			InitialDelaySeconds: 30,
+			PeriodSeconds:       10,
+			FailureThreshold:    60,
+			SuccessThreshold:    1,
+			TimeoutSeconds:      5,
+		}
+		livenessProbe = &corev1.Probe{
+			ProbeHandler:        healthProbe,
+			InitialDelaySeconds: 120,
+			PeriodSeconds:       30,
+			FailureThreshold:    5,
+			TimeoutSeconds:      5,
+		}
+	}
+
 	if !useSimulator {
 		envVars = append(envVars,
 			corev1.EnvVar{Name: "HF_HOME", Value: "/model-cache"},
@@ -153,9 +181,11 @@ func buildModelServiceDeployment(namespace, name, poolName, modelID string, useS
 							Ports: []corev1.ContainerPort{
 								{Name: "http", ContainerPort: 8000, Protocol: corev1.ProtocolTCP},
 							},
-							Env:          envVars,
-							Resources:    buildModelServiceResources(useSimulator),
-							VolumeMounts: volumeMounts,
+							Env:            envVars,
+							Resources:      buildModelServiceResources(useSimulator),
+							VolumeMounts:   volumeMounts,
+							ReadinessProbe: readinessProbe,
+							LivenessProbe:  livenessProbe,
 						},
 					},
 					Volumes:       volumes,

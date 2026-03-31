@@ -516,6 +516,7 @@ func CreateGuideLLMJobWithArgs(
 		"--request-type", "text_completions",
 		"--data", "prompt_tokens=4000,output_tokens=1000",
 		"--output-path", "/tmp/benchmarks.json",
+		"--backend-kwargs", `{"validate_backend": false}`,
 	}
 
 	job := &batchv1.Job{

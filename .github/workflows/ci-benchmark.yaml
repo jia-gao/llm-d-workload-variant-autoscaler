@@ -284,6 +284,7 @@ jobs:
           name: benchmark-results
           path: |
             /tmp/benchmark-results.json
+            /tmp/prefill-benchmark-results.json
             /tmp/benchmark-grafana-snapshot.txt
             /tmp/benchmark-grafana-snapshot.json
             /tmp/benchmark-panels/
@@ -573,6 +574,7 @@ jobs:
           name: benchmark-results-openshift
           path: |
             /tmp/benchmark-results.json
+            /tmp/prefill-benchmark-results.json
             /tmp/benchmark-grafana-snapshot.txt
             /tmp/benchmark-grafana-snapshot.json
             /tmp/benchmark-panels/
@@ -620,6 +622,30 @@ jobs:
             | Total duration | ${data.totalDurationSec.toFixed(0)}s |`;
             } catch (e) {
               console.log(`Could not read results: ${e.message}`);
+            }
+
+            let prefillSection = '';
+            try {
+              const prefillData = JSON.parse(fs.readFileSync('/tmp/prefill-benchmark-results.json', 'utf8'));
+              if (Array.isArray(prefillData) && prefillData.length > 0) {
+                let rows = '';
+                for (const r of prefillData) {
+                  const ttft = r.ttft ? JSON.stringify(r.ttft) : 'N/A';
+                  const itl = r.itl ? JSON.stringify(r.itl) : 'N/A';
+                  const throughput = r.throughput ? JSON.stringify(r.throughput) : 'N/A';
+                  rows += `\n### ${r.autoscaler_type}\n\n| Metric | Value |\n|--------|-------|\n| Duration | ${r.duration_sec.toFixed(0)}s |\n| Max Replicas | ${r.max_replicas} |\n| Avg Replicas | ${r.avg_replicas.toFixed(2)} |\n| Avg Queue Depth | ${r.avg_queue_depth.toFixed(2)} |\n| Avg KV Cache | ${r.avg_kv_cache.toFixed(3)} |\n| TTFT | ${ttft} |\n| ITL | ${itl} |\n| Throughput | ${throughput} |\n`;
+                  if (r.replica_timeline && r.replica_timeline.length > 0) {
+                    rows += `\n<details>\n<summary>Replica Timeline (${r.replica_timeline.length} snapshots)</summary>\n\n| Time (s) | Spec | Ready |\n|----------|------|-------|\n`;
+                    for (const s of r.replica_timeline) {
+                      rows += `| ${s.elapsed_sec.toFixed(0)} | ${s.spec_replicas} | ${s.ready_replicas} |\n`;
+                    }
+                    rows += `\n</details>\n`;
+                  }
+                }
+                prefillSection = `\n\n---\n\n## Benchmark: prefill-heavy-workload (OpenShift)\n${rows}`;
+              }
+            } catch (e) {
+              console.log(`Could not read prefill results: ${e.message}`);
             }
 
             let panelImages = '';
@@ -674,7 +700,7 @@ jobs:
 
             const body = `## Benchmark: scale-up-latency (OpenShift)
 
-            ${resultsTable}${panelImages}${artifactsSection}
+            ${resultsTable}${prefillSection}${panelImages}${artifactsSection}
 
             <details>
             <summary>Environment</summary>

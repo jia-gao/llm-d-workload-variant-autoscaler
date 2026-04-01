@@ -270,9 +270,11 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 			GinkgoWriter.Println("Falling back to direct model server connection (bypassing Gateway/EPP)")
 			targetURL = ensureDirectModelService()
 
-			By("Verifying direct model server connectivity")
-			directErr := fixtures.VerifyGatewayConnectivity(ctx, k8sClient, benchCfg.LLMDNamespace, targetURL, benchCfg.ModelID)
-			Expect(directErr).NotTo(HaveOccurred(), "Direct model server connectivity check also failed — backend is truly unreachable")
+			By("Verifying direct model server connectivity (with retries)")
+			Eventually(func(g Gomega) {
+				directErr := fixtures.VerifyGatewayConnectivity(ctx, k8sClient, benchCfg.LLMDNamespace, targetURL, benchCfg.ModelID)
+				g.Expect(directErr).NotTo(HaveOccurred(), "Direct model server not yet reachable")
+			}, 3*time.Minute, 20*time.Second).Should(Succeed(), "Direct model server connectivity check failed after retries — backend is truly unreachable")
 		} else {
 			GinkgoWriter.Println("Gateway connectivity check passed — using Gateway URL")
 			targetURL = gatewayURL
@@ -514,6 +516,10 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 		It("should run the prefill heavy workload against WVA", func() {
 			cleanupAutoscalers()
 			res.DeploymentName = findInfraDecodeDeployment()
+
+			By("Waiting for model server to recover after previous test")
+			time.Sleep(30 * time.Second)
+			ensureInfraDeploymentReady()
 
 			By("Creating VariantAutoscaling resource (Scale Up: 0s, Scale Down: 240s)")
 			err := fixtures.EnsureVariantAutoscaling(

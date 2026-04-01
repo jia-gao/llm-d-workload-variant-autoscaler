@@ -381,15 +381,11 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 			cleanupAutoscalers()
 			res.DeploymentName = findInfraDecodeDeployment()
 
-			By("Setting up EPP Configuration with Flow Control")
-			err := fixtures.EnsureEndpointPickerConfig(ctx, crClient, benchCfg.LLMDNamespace, benchCfg.EPPServiceName)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create EndpointPickerConfig")
-
 			By("Creating standard HPA (CPU-based, Scale Up: 0s, Scale Down: 240s)")
 			scaleUpPolicies := []autoscalingv2.HPAScalingPolicy{{Type: autoscalingv2.PercentScalingPolicy, Value: 100, PeriodSeconds: 15}}
 			scaleDownPolicies := []autoscalingv2.HPAScalingPolicy{{Type: autoscalingv2.PercentScalingPolicy, Value: 100, PeriodSeconds: 15}}
 
-			err = fixtures.EnsureStandardHPA(
+			err := fixtures.EnsureStandardHPA(
 				ctx, k8sClient, benchCfg.LLMDNamespace, res.HPAName, res.DeploymentName,
 				1, 10,
 				0, 240,
@@ -406,12 +402,8 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 			cleanupAutoscalers()
 			res.DeploymentName = findInfraDecodeDeployment()
 
-			By("Setting up EPP Configuration with Flow Control")
-			err := fixtures.EnsureEndpointPickerConfig(ctx, crClient, benchCfg.LLMDNamespace, benchCfg.EPPServiceName)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create EndpointPickerConfig")
-
 			By("Creating VariantAutoscaling resource (Scale Up: 0s, Scale Down: 240s)")
-			err = fixtures.EnsureVariantAutoscaling(
+			err := fixtures.EnsureVariantAutoscaling(
 				ctx, crClient, benchCfg.LLMDNamespace, res.VAName, res.DeploymentName,
 				benchCfg.ModelID, benchCfg.AcceleratorType, 30.0, benchCfg.ControllerInstance,
 				fixtures.WithMinReplicas(1),

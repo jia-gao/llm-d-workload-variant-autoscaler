@@ -575,6 +575,114 @@ jobs:
           export PROMETHEUS_TOKEN=$(kubectl create token prometheus-k8s -n openshift-monitoring --duration=24h 2>/dev/null || echo "")
           make test-benchmark
 
+      - name: Generate benchmark plots
+        if: always()
+        run: |
+          pip install --quiet matplotlib numpy 2>/dev/null || pip3 install --quiet matplotlib numpy 2>/dev/null || true
+          python3 - <<'PLOTEOF'
+          import json, os, sys
+          try:
+              import matplotlib
+              matplotlib.use('Agg')
+              import matplotlib.pyplot as plt
+              import matplotlib.ticker as ticker
+              import numpy as np
+          except ImportError:
+              print("matplotlib not available, skipping plot generation")
+              sys.exit(0)
+
+          PANEL_DIR = '/tmp/benchmark-panels'
+          PREFILL_FILE = '/tmp/prefill-benchmark-results.json'
+          os.makedirs(PANEL_DIR, exist_ok=True)
+
+          if not os.path.exists(PREFILL_FILE):
+              print("No prefill results found, skipping plots")
+              sys.exit(0)
+
+          with open(PREFILL_FILE) as f:
+              results = json.load(f)
+
+          if not isinstance(results, list) or len(results) < 2:
+              print("Need at least 2 results (HPA + WVA) for comparison plots")
+              sys.exit(0)
+
+          hpa = next((r for r in results if r['autoscaler_type'] == 'HPA'), None)
+          wva = next((r for r in results if r['autoscaler_type'] == 'WVA'), None)
+          if not hpa or not wva:
+              print("Missing HPA or WVA results")
+              sys.exit(0)
+
+          plt.rcParams.update({
+              'figure.facecolor': 'white', 'axes.facecolor': '#f8f9fa',
+              'axes.grid': True, 'grid.alpha': 0.3, 'font.size': 12,
+              'axes.titlesize': 14, 'axes.labelsize': 12, 'figure.dpi': 150,
+          })
+          HPA_C, WVA_C = '#e74c3c', '#2ecc71'
+
+          def bar_pair(ax, hv, wv, title, ylabel, fmt='.1f'):
+              bars = ax.bar(['HPA', 'WVA'], [hv, wv], color=[HPA_C, WVA_C], width=0.5, edgecolor='white', linewidth=1.5)
+              ax.set_title(title, fontweight='bold')
+              ax.set_ylabel(ylabel)
+              for bar, val in zip(bars, [hv, wv]):
+                  ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + ax.get_ylim()[1]*0.02,
+                          f'{val:{fmt}}', ha='center', va='bottom', fontweight='bold', fontsize=11)
+
+          # 1. Comparison bars
+          fig, axes = plt.subplots(2, 3, figsize=(16, 9))
+          fig.suptitle('HPA vs WVA — Prefill-Heavy Workload (OpenShift)', fontsize=16, fontweight='bold', y=1.02)
+          bar_pair(axes[0,0], hpa['throughput']['mean'], wva['throughput']['mean'], 'Mean Throughput', 'tokens/sec', '.0f')
+          bar_pair(axes[0,1], hpa['ttft']['count'], wva['ttft']['count'], 'Completed Requests', 'count', 'd')
+          bar_pair(axes[0,2], hpa['max_replicas'], wva['max_replicas'], 'Max Replicas', 'replicas', 'd')
+          bar_pair(axes[1,0], hpa['avg_queue_depth'], wva['avg_queue_depth'], 'Avg Queue Depth', 'requests', '.0f')
+          bar_pair(axes[1,1], hpa['itl']['mean'], wva['itl']['mean'], 'Mean ITL', 'ms', '.2f')
+          bar_pair(axes[1,2], hpa['ttft']['mean']/1000, wva['ttft']['mean']/1000, 'Mean TTFT', 'seconds', '.1f')
+          fig.tight_layout()
+          fig.savefig(os.path.join(PANEL_DIR, 'panel-prefill-comparison.png'), bbox_inches='tight', dpi=150)
+          plt.close()
+
+          # 2. Replica timeline overlay
+          fig, ax = plt.subplots(figsize=(14, 5))
+          for data, label, color in [(hpa, 'HPA', HPA_C), (wva, 'WVA', WVA_C)]:
+              tl = data['replica_timeline']
+              times = [s['elapsed_sec'] for s in tl]
+              ready = [s['ready_replicas'] for s in tl]
+              ax.step(times, ready, where='post', label=f'{label} (ready)', color=color, linewidth=2.5)
+              ax.fill_between(times, ready, step='post', alpha=0.1, color=color)
+          ax.set_title('Ready Replicas Over Time — HPA vs WVA', fontsize=14, fontweight='bold')
+          ax.set_xlabel('Time (seconds)')
+          ax.set_ylabel('Ready Replicas')
+          ax.legend(fontsize=12)
+          ax.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+          ax.set_ylim(0, max(wva['max_replicas'], hpa['max_replicas']) + 1)
+          fig.tight_layout()
+          fig.savefig(os.path.join(PANEL_DIR, 'panel-prefill-replica-timeline.png'), bbox_inches='tight', dpi=150)
+          plt.close()
+
+          # 3. Throughput percentile distribution
+          pct_keys = ['p05', 'p10', 'p25', 'p50', 'p75', 'p90', 'p95', 'p99']
+          pct_labels = ['p5', 'p10', 'p25', 'p50', 'p75', 'p90', 'p95', 'p99']
+          x = np.arange(len(pct_labels))
+          w = 0.35
+          fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))
+          fig.suptitle('Percentile Distributions — HPA vs WVA', fontsize=15, fontweight='bold')
+          for ax, metric, unit, div in [(ax1,'ttft','seconds',1000),(ax2,'itl','ms',1),(ax3,'throughput','tok/s',1)]:
+              hv = [hpa[metric]['percentiles'][k]/div for k in pct_keys]
+              wv = [wva[metric]['percentiles'][k]/div for k in pct_keys]
+              ax.bar(x - w/2, hv, w, label='HPA', color=HPA_C, alpha=0.85)
+              ax.bar(x + w/2, wv, w, label='WVA', color=WVA_C, alpha=0.85)
+              ax.set_xticks(x); ax.set_xticklabels(pct_labels, fontsize=9)
+              ax.set_title(f'{metric.upper()} Percentiles', fontweight='bold')
+              ax.set_ylabel(unit); ax.legend(fontsize=9)
+          fig.tight_layout()
+          fig.savefig(os.path.join(PANEL_DIR, 'panel-prefill-percentiles.png'), bbox_inches='tight', dpi=150)
+          plt.close()
+
+          print(f"Generated 3 benchmark plots in {PANEL_DIR}")
+          for f in sorted(os.listdir(PANEL_DIR)):
+              if f.endswith('.png'):
+                  print(f"  {f}")
+          PLOTEOF
+
       - name: Upload benchmark results
         if: always()
         uses: actions/upload-artifact@v4
@@ -589,7 +697,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Post benchmark results as PR comment
-        if: always() && github.event_name == 'issue_comment'
+        if: always() && (github.event_name == 'issue_comment' || needs.gate.outputs.pr_number != '')
         uses: actions/github-script@v7
         with:
           script: |
@@ -635,20 +743,52 @@ jobs:
             let prefillSection = '';
             try {
               const prefillData = JSON.parse(fs.readFileSync('/tmp/prefill-benchmark-results.json', 'utf8'));
-              if (Array.isArray(prefillData) && prefillData.length > 0) {
+              if (Array.isArray(prefillData) && prefillData.length >= 2) {
+                const hpa = prefillData.find(r => r.autoscaler_type === 'HPA');
+                const wva = prefillData.find(r => r.autoscaler_type === 'WVA');
+                if (hpa && wva) {
+                  const delta = (h, w, lowerBetter) => {
+                    if (h === 0) return '—';
+                    const pct = ((w - h) / Math.abs(h)) * 100;
+                    const arrow = pct < 0 ? '↓' : '↑';
+                    const sign = pct > 0 ? '+' : '';
+                    return `${sign}${pct.toFixed(1)}% ${arrow}`;
+                  };
+                  const fmtP = (obj, key, div=1) => obj && obj.percentiles ? (obj.percentiles[key]/div).toFixed(1) : 'N/A';
+                  const fmtM = (obj, div=1, prec=1) => obj ? (obj.mean/div).toFixed(prec) : 'N/A';
+
+                  let table = `| Metric | HPA (Baseline) | WVA | Δ |
+            |--------|---------------|-----|---|
+            | **Max Replicas** | ${hpa.max_replicas} | **${wva.max_replicas}** | ${delta(hpa.max_replicas, wva.max_replicas)} |
+            | **Avg Replicas** | ${hpa.avg_replicas.toFixed(2)} | **${wva.avg_replicas.toFixed(2)}** | ${delta(hpa.avg_replicas, wva.avg_replicas)} |
+            | **Avg Queue Depth** | ${hpa.avg_queue_depth.toFixed(1)} | **${wva.avg_queue_depth.toFixed(1)}** | ${delta(hpa.avg_queue_depth, wva.avg_queue_depth)} |
+            | **Avg KV Cache** | ${hpa.avg_kv_cache.toFixed(3)} | ${wva.avg_kv_cache.toFixed(3)} | ${delta(hpa.avg_kv_cache, wva.avg_kv_cache)} |
+            | **TTFT mean** | ${fmtM(hpa.ttft, 1000)}ms | **${fmtM(wva.ttft, 1000)}ms** | ${hpa.ttft && wva.ttft ? delta(hpa.ttft.mean, wva.ttft.mean) : '—'} |
+            | **TTFT p50** | ${fmtP(hpa.ttft, 'p50', 1000)}s | **${fmtP(wva.ttft, 'p50', 1000)}s** | — |
+            | **TTFT p99** | ${fmtP(hpa.ttft, 'p99', 1000)}s | **${fmtP(wva.ttft, 'p99', 1000)}s** | — |
+            | **ITL mean** | ${fmtM(hpa.itl, 1, 2)}ms | **${fmtM(wva.itl, 1, 2)}ms** | ${hpa.itl && wva.itl ? delta(hpa.itl.mean, wva.itl.mean) : '—'} |
+            | **Throughput mean** | ${fmtM(hpa.throughput)}tok/s | **${fmtM(wva.throughput)}tok/s** | ${hpa.throughput && wva.throughput ? delta(hpa.throughput.mean, wva.throughput.mean) : '—'} |
+            | **Throughput p50** | ${fmtP(hpa.throughput, 'p50')}tok/s | **${fmtP(wva.throughput, 'p50')}tok/s** | — |
+            | **Completed Requests** | ${hpa.ttft ? hpa.ttft.count : 'N/A'} | **${wva.ttft ? wva.ttft.count : 'N/A'}** | ${hpa.ttft && wva.ttft ? delta(hpa.ttft.count, wva.ttft.count) : '—'} |
+            | **Duration** | ${hpa.duration_sec.toFixed(0)}s | ${wva.duration_sec.toFixed(0)}s | — |`;
+
+                  let timelines = '';
+                  for (const r of [hpa, wva]) {
+                    if (r.replica_timeline && r.replica_timeline.length > 0) {
+                      timelines += `\n<details>\n<summary>${r.autoscaler_type} Replica Timeline (${r.replica_timeline.length} snapshots)</summary>\n\n| Time (s) | Spec | Ready |\n|----------|------|-------|\n`;
+                      for (const s of r.replica_timeline) {
+                        timelines += `| ${s.elapsed_sec.toFixed(0)} | ${s.spec_replicas} | ${s.ready_replicas} |\n`;
+                      }
+                      timelines += `\n</details>\n`;
+                    }
+                  }
+
+                  prefillSection = `\n\n---\n\n## Benchmark: prefill-heavy-workload (OpenShift)\n\n${table}\n${timelines}`;
+                }
+              } else if (Array.isArray(prefillData) && prefillData.length > 0) {
                 let rows = '';
                 for (const r of prefillData) {
-                  const ttft = r.ttft ? JSON.stringify(r.ttft) : 'N/A';
-                  const itl = r.itl ? JSON.stringify(r.itl) : 'N/A';
-                  const throughput = r.throughput ? JSON.stringify(r.throughput) : 'N/A';
-                  rows += `\n### ${r.autoscaler_type}\n\n| Metric | Value |\n|--------|-------|\n| Duration | ${r.duration_sec.toFixed(0)}s |\n| Max Replicas | ${r.max_replicas} |\n| Avg Replicas | ${r.avg_replicas.toFixed(2)} |\n| Avg Queue Depth | ${r.avg_queue_depth.toFixed(2)} |\n| Avg KV Cache | ${r.avg_kv_cache.toFixed(3)} |\n| TTFT | ${ttft} |\n| ITL | ${itl} |\n| Throughput | ${throughput} |\n`;
-                  if (r.replica_timeline && r.replica_timeline.length > 0) {
-                    rows += `\n<details>\n<summary>Replica Timeline (${r.replica_timeline.length} snapshots)</summary>\n\n| Time (s) | Spec | Ready |\n|----------|------|-------|\n`;
-                    for (const s of r.replica_timeline) {
-                      rows += `| ${s.elapsed_sec.toFixed(0)} | ${s.spec_replicas} | ${s.ready_replicas} |\n`;
-                    }
-                    rows += `\n</details>\n`;
-                  }
+                  rows += `\n### ${r.autoscaler_type}\n\n| Metric | Value |\n|--------|-------|\n| Duration | ${r.duration_sec.toFixed(0)}s |\n| Max Replicas | ${r.max_replicas} |\n| Avg Replicas | ${r.avg_replicas.toFixed(2)} |\n| Avg Queue Depth | ${r.avg_queue_depth.toFixed(2)} |\n| Avg KV Cache | ${r.avg_kv_cache.toFixed(3)} |\n`;
                 }
                 prefillSection = `\n\n---\n\n## Benchmark: prefill-heavy-workload (OpenShift)\n${rows}`;
               }

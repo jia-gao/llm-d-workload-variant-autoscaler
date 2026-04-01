@@ -578,13 +578,10 @@ jobs:
       - name: Generate benchmark plots
         if: always()
         run: |
-          echo "Installing matplotlib and numpy..."
-          python3 -m pip install --user matplotlib numpy 2>&1 || {
-            echo "pip not available, bootstrapping from get-pip.py..."
-            curl -sSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
-            python3 /tmp/get-pip.py --user 2>&1
-            python3 -m pip install --user matplotlib numpy 2>&1
-          } || echo "WARNING: Could not install matplotlib — plots will be skipped"
+          echo "Installing matplotlib and numpy via venv..."
+          python3 -m venv /tmp/plot-venv
+          /tmp/plot-venv/bin/pip install --quiet matplotlib numpy 2>&1 || echo "WARNING: Could not install matplotlib — plots will be skipped"
+          export PATH="/tmp/plot-venv/bin:$PATH"
           python3 - <<'PLOTEOF'
           import json, os, sys
           try:

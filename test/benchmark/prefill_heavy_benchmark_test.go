@@ -11,7 +11,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -56,13 +55,11 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 	BeforeEach(func() {
 		ctx, cancel = context.WithCancel(context.Background())
 		res = ScenarioResources{
-			PoolName:       benchCfg.PoolName,
-			ModelService:   "prefill-ms",
-			DeploymentName: "prefill-ms-decode",
-			ServiceName:    "prefill-ms-service",
-			VAName:         "prefill-va",
-			HPAName:        "prefill-hpa",
-			JobBaseName:    "prefill-ms",
+			PoolName:     benchCfg.PoolName,
+			ModelService: "prefill-ms",
+			VAName:       "prefill-va",
+			HPAName:      "prefill-hpa",
+			JobBaseName:  "prefill-ms",
 		}
 	})
 
@@ -79,35 +76,48 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 		time.Sleep(3 * time.Second)
 	}
 
-	// scaleDownOtherDecodeDeployments scales any decode deployments that aren't ours to 0 replicas.
-	// This ensures the EPP only routes to our prefill-ms-decode pods with the correct max-model-len.
-	scaleDownOtherDecodeDeployments := func() {
-		By("Scaling down other decode deployments in the pool")
+	// findInfraDecodeDeployment discovers the Helm-deployed decode deployment.
+	// We reuse this deployment instead of creating a new one because the Gateway/EPP
+	// routing is configured to match its labels (InferencePool selector).
+	findInfraDecodeDeployment := func() string {
+		By("Finding Helm-deployed decode deployment for Gateway-compatible routing")
 		deployments, err := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			GinkgoWriter.Printf("Warning: could not list deployments: %v\n", err)
-			return
-		}
-		zero := int32(0)
+		Expect(err).NotTo(HaveOccurred(), "Failed to list deployments")
 		for i := range deployments.Items {
 			d := &deployments.Items[i]
-			if d.Name == res.DeploymentName {
-				continue
-			}
-			if !strings.HasSuffix(d.Name, "-decode") {
-				continue
-			}
-			if d.Spec.Replicas != nil && *d.Spec.Replicas == 0 {
-				continue
-			}
-			GinkgoWriter.Printf("  Scaling down %s from %d to 0 replicas\n", d.Name, *d.Spec.Replicas)
-			d.Spec.Replicas = &zero
-			_, updateErr := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Update(ctx, d, metav1.UpdateOptions{})
-			if updateErr != nil {
-				GinkgoWriter.Printf("  Warning: failed to scale down %s: %v\n", d.Name, updateErr)
+			if strings.HasSuffix(d.Name, "-decode") && strings.Contains(d.Name, "modelservice") {
+				GinkgoWriter.Printf("  Found infra decode deployment: %s\n", d.Name)
+				return d.Name
 			}
 		}
-		time.Sleep(5 * time.Second)
+		Fail("No Helm-deployed decode deployment found in namespace " + benchCfg.LLMDNamespace)
+		return ""
+	}
+
+	// ensureInfraDeploymentReady scales the Helm-deployed model service to 1 replica and waits for readiness.
+	ensureInfraDeploymentReady := func() {
+		By("Ensuring infra decode deployment is scaled to 1 and ready")
+		one := int32(1)
+		deployment, err := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Get(ctx, res.DeploymentName, metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 1 {
+			deployment.Spec.Replicas = &one
+			_, err = k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Update(ctx, deployment, metav1.UpdateOptions{})
+			Expect(err).NotTo(HaveOccurred(), "Failed to scale infra deployment to 1")
+			GinkgoWriter.Printf("  Scaled %s to 1 replica\n", res.DeploymentName)
+		}
+
+		By("Waiting for infra deployment to have at least 1 ready replica")
+		Eventually(func(g Gomega) {
+			d, getErr := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Get(ctx, res.DeploymentName, metav1.GetOptions{})
+			g.Expect(getErr).NotTo(HaveOccurred())
+			spec := int32(0)
+			if d.Spec.Replicas != nil {
+				spec = *d.Spec.Replicas
+			}
+			GinkgoWriter.Printf("  %s: spec=%d, ready=%d\n", res.DeploymentName, spec, d.Status.ReadyReplicas)
+			g.Expect(d.Status.ReadyReplicas).To(BeNumerically(">=", 1), "Deployment should have at least 1 ready replica")
+		}, 15*time.Minute, 10*time.Second).Should(Succeed())
 	}
 
 	// waitForVAAndMetrics waits for the VA to stabilize, external metrics to be available,
@@ -147,66 +157,7 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 	}
 
 	runPrefillBenchmark := func(autoscalerType string) {
-		By("Waiting for deployment to be ready (with pod health diagnostics)")
-		var lastLogDump int32
-		Eventually(func(g Gomega) {
-			deployment, err := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Get(ctx, res.DeploymentName, metav1.GetOptions{})
-			g.Expect(err).NotTo(HaveOccurred())
-
-			pods, podErr := k8sClient.CoreV1().Pods(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{
-				LabelSelector: fmt.Sprintf("app=%s", res.DeploymentName),
-			})
-			if podErr == nil {
-				for i := range pods.Items {
-					p := &pods.Items[i]
-					for _, cs := range p.Status.ContainerStatuses {
-						if cs.State.Waiting != nil {
-							GinkgoWriter.Printf("  Pod %s: WAITING reason=%s message=%s restarts=%d\n",
-								p.Name, cs.State.Waiting.Reason, cs.State.Waiting.Message, cs.RestartCount)
-						} else if cs.State.Terminated != nil {
-							GinkgoWriter.Printf("  Pod %s: TERMINATED reason=%s exitCode=%d restarts=%d\n",
-								p.Name, cs.State.Terminated.Reason, cs.State.Terminated.ExitCode, cs.RestartCount)
-						} else if cs.State.Running != nil {
-							GinkgoWriter.Printf("  Pod %s: RUNNING ready=%v restarts=%d\n",
-								p.Name, cs.Ready, cs.RestartCount)
-						}
-						// Dump previous container logs once after first crash to see why it died
-						if cs.RestartCount > 0 && cs.RestartCount > lastLogDump {
-							lastLogDump = cs.RestartCount
-							logOpts := &corev1.PodLogOptions{Container: cs.Name, Previous: true, TailLines: ptr.To(int64(50))}
-							req := k8sClient.CoreV1().Pods(benchCfg.LLMDNamespace).GetLogs(p.Name, logOpts)
-							logStream, logErr := req.Stream(ctx)
-							if logErr == nil {
-								buf := make([]byte, 8192)
-								n, _ := logStream.Read(buf)
-								logStream.Close()
-								if n > 0 {
-									GinkgoWriter.Printf("\n--- CRASHED CONTAINER LOGS (previous, tail 50) ---\n%s\n--- END LOGS ---\n\n", string(buf[:n]))
-								}
-							}
-						}
-					}
-				}
-			}
-
-			g.Expect(deployment.Status.ReadyReplicas).To(BeNumerically(">=", 1), "Deployment should have at least 1 ready replica")
-		}, 15*time.Minute, 10*time.Second).Should(Succeed())
-
-		By("Listing all decode deployments in namespace (diagnostics)")
-		deployments, _ := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{})
-		if deployments != nil {
-			for i := range deployments.Items {
-				d := &deployments.Items[i]
-				if strings.HasSuffix(d.Name, "-decode") || strings.Contains(d.Name, "decode") {
-					ready := d.Status.ReadyReplicas
-					spec := int32(0)
-					if d.Spec.Replicas != nil {
-						spec = *d.Spec.Replicas
-					}
-					GinkgoWriter.Printf("  Decode deployment: %s (spec=%d, ready=%d)\n", d.Name, spec, ready)
-				}
-			}
-		}
+		ensureInfraDeploymentReady()
 
 		By("Verifying Gateway connectivity with a small test request")
 		targetURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d",
@@ -428,23 +379,11 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 	Context("HPA Baseline", func() {
 		It("should run the prefill heavy workload against standard HPA", func() {
 			cleanupAutoscalers()
-			scaleDownOtherDecodeDeployments()
+			res.DeploymentName = findInfraDecodeDeployment()
 
 			By("Setting up EPP Configuration with Flow Control")
 			err := fixtures.EnsureEndpointPickerConfig(ctx, crClient, benchCfg.LLMDNamespace, benchCfg.EPPServiceName)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create EndpointPickerConfig")
-
-			By("Creating model service deployment")
-			err = fixtures.EnsureModelService(ctx, k8sClient, benchCfg.LLMDNamespace, res.ModelService, res.PoolName, benchCfg.ModelID, benchCfg.UseSimulator, benchCfg.MaxNumSeqs)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create model service")
-
-			By("Creating service to expose model server")
-			err = fixtures.EnsureService(ctx, k8sClient, benchCfg.LLMDNamespace, res.ModelService, res.DeploymentName, 8000)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create service")
-
-			By("Creating ServiceMonitor for metrics scraping")
-			err = fixtures.EnsureServiceMonitor(ctx, crClient, benchCfg.MonitoringNS, benchCfg.LLMDNamespace, res.ModelService, res.DeploymentName)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create ServiceMonitor")
 
 			By("Creating standard HPA (CPU-based, Scale Up: 0s, Scale Down: 240s)")
 			scaleUpPolicies := []autoscalingv2.HPAScalingPolicy{{Type: autoscalingv2.PercentScalingPolicy, Value: 100, PeriodSeconds: 15}}
@@ -465,23 +404,11 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 	Context("WVA", func() {
 		It("should run the prefill heavy workload against WVA", func() {
 			cleanupAutoscalers()
-			scaleDownOtherDecodeDeployments()
+			res.DeploymentName = findInfraDecodeDeployment()
 
 			By("Setting up EPP Configuration with Flow Control")
 			err := fixtures.EnsureEndpointPickerConfig(ctx, crClient, benchCfg.LLMDNamespace, benchCfg.EPPServiceName)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create EndpointPickerConfig")
-
-			By("Creating model service deployment")
-			err = fixtures.EnsureModelService(ctx, k8sClient, benchCfg.LLMDNamespace, res.ModelService, res.PoolName, benchCfg.ModelID, benchCfg.UseSimulator, benchCfg.MaxNumSeqs)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create model service")
-
-			By("Creating service to expose model server")
-			err = fixtures.EnsureService(ctx, k8sClient, benchCfg.LLMDNamespace, res.ModelService, res.DeploymentName, 8000)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create service")
-
-			By("Creating ServiceMonitor for metrics scraping")
-			err = fixtures.EnsureServiceMonitor(ctx, crClient, benchCfg.MonitoringNS, benchCfg.LLMDNamespace, res.ModelService, res.DeploymentName)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create ServiceMonitor")
 
 			By("Creating VariantAutoscaling resource (Scale Up: 0s, Scale Down: 240s)")
 			err = fixtures.EnsureVariantAutoscaling(

@@ -82,8 +82,14 @@ func VerifyGatewayConnectivity(ctx context.Context, k8sClient *kubernetes.Client
 	time.Sleep(3 * time.Second)
 
 	curlCmd := fmt.Sprintf(
-		`curl -sf -m 60 -X POST "%s/v1/completions" -H "Content-Type: application/json" -d '{"model":"%s","prompt":"Hello","max_tokens":5}' && echo "OK"`,
-		gatewayURL, modelID,
+		`echo "=== Connectivity check to %s ===" && `+
+			`echo "Attempting request..." && `+
+			`HTTP_CODE=$(curl -sS -o /tmp/body.txt -w "%%{http_code}" -m 60 -X POST "%s/v1/completions" `+
+			`-H "Content-Type: application/json" `+
+			`-d '{"model":"%s","prompt":"Hello","max_tokens":5}') && `+
+			`echo "HTTP_CODE=$HTTP_CODE" && cat /tmp/body.txt && echo "" && `+
+			`if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then echo "OK"; else echo "FAIL: HTTP $HTTP_CODE"; exit 1; fi`,
+		gatewayURL, gatewayURL, modelID,
 	)
 
 	job := &batchv1.Job{

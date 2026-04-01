@@ -579,9 +579,10 @@ jobs:
         if: always()
         run: |
           echo "Installing matplotlib and numpy..."
-          pip3 install --user matplotlib numpy || pip install --user matplotlib numpy || {
-            echo "WARNING: pip install failed, trying with --break-system-packages"
-            pip3 install --user --break-system-packages matplotlib numpy || true
+          python3 -m pip install --user matplotlib numpy 2>&1 || \
+          python3 -m pip install --user --break-system-packages matplotlib numpy 2>&1 || \
+          python3 -m ensurepip --user 2>&1 && python3 -m pip install --user matplotlib numpy 2>&1 || {
+            echo "WARNING: Could not install matplotlib — plots will be skipped"
           }
           python3 - <<'PLOTEOF'
           import json, os, sys

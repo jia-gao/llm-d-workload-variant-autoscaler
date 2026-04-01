@@ -578,7 +578,11 @@ jobs:
       - name: Generate benchmark plots
         if: always()
         run: |
-          pip install --quiet matplotlib numpy 2>/dev/null || pip3 install --quiet matplotlib numpy 2>/dev/null || true
+          echo "Installing matplotlib and numpy..."
+          pip3 install --user matplotlib numpy || pip install --user matplotlib numpy || {
+            echo "WARNING: pip install failed, trying with --break-system-packages"
+            pip3 install --user --break-system-packages matplotlib numpy || true
+          }
           python3 - <<'PLOTEOF'
           import json, os, sys
           try:

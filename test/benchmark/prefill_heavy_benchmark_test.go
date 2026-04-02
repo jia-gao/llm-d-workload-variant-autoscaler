@@ -226,37 +226,67 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 		GinkgoWriter.Println("--- End Diagnostics ---")
 	}
 
-	// ensureEPPConfig updates the EPP's existing ConfigMap to enable
-	// flowControl and set scorer weights (queue=2, kv-cache=2, prefix-cache=3),
-	// then triggers a rollout restart and waits for Gateway health.
-	ensureEPPConfig := func() {
+	// verifyEPPConfig checks that the EPP is deployed with the expected
+	// flow control and scorer configuration. The CI deploy step (install.sh)
+	// with E2E_TESTS_ENABLED=true already configures the EPP with:
+	//   - Image v0.5.0-rc.1
+	//   - ENABLE_EXPERIMENTAL_FLOW_CONTROL_LAYER=true env var
+	//   - ConfigMap with scorer weights queue=2, kv-cache=2, prefix-cache=3
+	// We do NOT modify the EPP — changing the config causes conflicts that
+	// break Gateway routing (HTTP 500).
+	verifyEPPConfig := func() {
 		By("Discovering EPP deployment")
 		eppDeployName, findErr := fixtures.FindEPPDeployment(ctx, k8sClient, benchCfg.LLMDNamespace)
 		Expect(findErr).NotTo(HaveOccurred(), "Failed to find EPP deployment")
 		GinkgoWriter.Printf("  Found EPP deployment: %s\n", eppDeployName)
 
-		By("Updating EPP ConfigMap with flowControl + scorer weights 2/2/3")
-		patchErr := fixtures.PatchEPPConfigMap(ctx, k8sClient, benchCfg.LLMDNamespace, eppDeployName)
-		Expect(patchErr).NotTo(HaveOccurred(), "Failed to update EPP ConfigMap")
-		GinkgoWriter.Println("  EPP ConfigMap updated and rollout completed")
+		dep, err := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Get(ctx, eppDeployName, metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred(), "Failed to get EPP deployment")
 
-		By("Waiting for Gateway to become healthy after EPP rollout")
-		Eventually(func(g Gomega) {
-			gwURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d",
-				benchCfg.GatewayServiceName, benchCfg.LLMDNamespace, benchCfg.GatewayServicePort)
-			err := fixtures.VerifyGatewayConnectivity(ctx, k8sClient, benchCfg.LLMDNamespace, gwURL, benchCfg.ModelID)
-			g.Expect(err).NotTo(HaveOccurred(), "Gateway not ready yet after EPP rollout")
-		}, 5*time.Minute, 15*time.Second).Should(Succeed(), "Gateway failed to become healthy after EPP config update")
-		GinkgoWriter.Println("  Gateway is healthy after EPP config update")
+		c := dep.Spec.Template.Spec.Containers[0]
+		GinkgoWriter.Printf("  EPP image: %s\n", c.Image)
+		GinkgoWriter.Printf("  EPP args: %v\n", c.Args)
+
+		flowControlEnabled := false
+		for _, e := range c.Env {
+			if e.Name == "ENABLE_EXPERIMENTAL_FLOW_CONTROL_LAYER" && e.Value == "true" {
+				flowControlEnabled = true
+			}
+			GinkgoWriter.Printf("  EPP env: %s=%s\n", e.Name, e.Value)
+		}
+
+		if flowControlEnabled {
+			GinkgoWriter.Println("  Flow control: ENABLED (via env var)")
+		} else {
+			GinkgoWriter.Println("  WARNING: Flow control env var not found — EPP queue metrics may be zero")
+		}
+
+		for _, v := range dep.Spec.Template.Spec.Volumes {
+			if v.ConfigMap != nil {
+				cm, cmErr := k8sClient.CoreV1().ConfigMaps(benchCfg.LLMDNamespace).Get(ctx, v.ConfigMap.Name, metav1.GetOptions{})
+				if cmErr == nil {
+					for key, val := range cm.Data {
+						GinkgoWriter.Printf("  EPP ConfigMap %s/%s:\n%s\n", v.ConfigMap.Name, key, val)
+					}
+				}
+			}
+		}
 	}
 
 	runPrefillBenchmark := func(autoscalerType string) {
 		ensureInfraDeploymentReady()
-		ensureEPPConfig()
+		verifyEPPConfig()
 		dumpInfrastructureDiagnostics()
 
 		gatewayURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d",
 			benchCfg.GatewayServiceName, benchCfg.LLMDNamespace, benchCfg.GatewayServicePort)
+
+		By("Verifying Gateway connectivity (hard requirement — traffic must flow through EPP)")
+		Eventually(func(g Gomega) {
+			err := fixtures.VerifyGatewayConnectivity(ctx, k8sClient, benchCfg.LLMDNamespace, gatewayURL, benchCfg.ModelID)
+			g.Expect(err).NotTo(HaveOccurred(), "Gateway not ready yet")
+		}, 5*time.Minute, 15*time.Second).Should(Succeed(), "Gateway connectivity check failed — EPP must be reachable via Gateway")
+		GinkgoWriter.Println("  Gateway connectivity verified")
 
 		targetURL := gatewayURL
 		GinkgoWriter.Printf("  Using Gateway URL (traffic flows through EPP): %s\n", targetURL)

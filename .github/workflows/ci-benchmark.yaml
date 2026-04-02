@@ -652,15 +652,17 @@ jobs:
                   ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + ax.get_ylim()[1]*0.02,
                           f'{val:{fmt}}', ha='center', va='bottom', fontweight='bold', fontsize=11)
 
-          # 1. Comparison bars
-          fig, axes = plt.subplots(2, 3, figsize=(16, 9))
+          # 1. Comparison bars (2x4 grid)
+          fig, axes = plt.subplots(2, 4, figsize=(20, 9))
           fig.suptitle('HPA vs WVA — Prefill-Heavy Workload (OpenShift)', fontsize=16, fontweight='bold', y=1.02)
           bar_pair(axes[0,0], hpa['throughput']['mean'], wva['throughput']['mean'], 'Mean Throughput', 'tokens/sec', '.0f')
           bar_pair(axes[0,1], hpa['ttft']['count'], wva['ttft']['count'], 'Completed Requests', 'count', 'd')
           bar_pair(axes[0,2], hpa['max_replicas'], wva['max_replicas'], 'Max Replicas', 'replicas', 'd')
+          bar_pair(axes[0,3], hpa['avg_kv_cache'], wva['avg_kv_cache'], 'Avg KV Cache', 'utilization', '.3f')
           bar_pair(axes[1,0], hpa['avg_queue_depth'], wva['avg_queue_depth'], 'Avg Queue Depth', 'requests', '.0f')
           bar_pair(axes[1,1], hpa['itl']['mean'], wva['itl']['mean'], 'Mean ITL', 'ms', '.2f')
           bar_pair(axes[1,2], hpa['ttft']['mean']/1000, wva['ttft']['mean']/1000, 'Mean TTFT', 'seconds', '.1f')
+          bar_pair(axes[1,3], hpa['avg_replicas'], wva['avg_replicas'], 'Avg Replicas', 'replicas', '.1f')
           fig.tight_layout()
           fig.savefig(os.path.join(PANEL_DIR, 'panel-prefill-comparison.png'), bbox_inches='tight', dpi=150)
           plt.close()
@@ -683,7 +685,31 @@ jobs:
           fig.savefig(os.path.join(PANEL_DIR, 'panel-prefill-replica-timeline.png'), bbox_inches='tight', dpi=150)
           plt.close()
 
-          # 3. Throughput percentile distribution
+          # 3. Queue depth + KV cache over time
+          fig, (ax_qd, ax_kv) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+          fig.suptitle('Queue Depth & KV Cache Over Time — HPA vs WVA', fontsize=15, fontweight='bold')
+          for data, label, color in [(hpa, 'HPA', HPA_C), (wva, 'WVA', WVA_C)]:
+              mt = data.get('metrics_timeline', [])
+              if mt:
+                  times = [s['elapsed_sec'] for s in mt]
+                  qd = [s['queue_depth'] for s in mt]
+                  kv = [s['kv_cache'] for s in mt]
+                  ax_qd.plot(times, qd, label=label, color=color, linewidth=2, alpha=0.85)
+                  ax_qd.fill_between(times, qd, alpha=0.1, color=color)
+                  ax_kv.plot(times, kv, label=label, color=color, linewidth=2, alpha=0.85)
+                  ax_kv.fill_between(times, kv, alpha=0.1, color=color)
+          ax_qd.set_title('Queue Depth (vllm:num_requests_waiting)', fontweight='bold')
+          ax_qd.set_ylabel('Waiting Requests')
+          ax_qd.legend(fontsize=11)
+          ax_kv.set_title('KV Cache Utilization (vllm:kv_cache_usage_perc)', fontweight='bold')
+          ax_kv.set_ylabel('Utilization')
+          ax_kv.set_xlabel('Time (seconds)')
+          ax_kv.legend(fontsize=11)
+          fig.tight_layout()
+          fig.savefig(os.path.join(PANEL_DIR, 'panel-prefill-metrics-timeline.png'), bbox_inches='tight', dpi=150)
+          plt.close()
+
+          # 4. Throughput percentile distribution
           pct_keys = ['p05', 'p10', 'p25', 'p50', 'p75', 'p90', 'p95', 'p99']
           pct_labels = ['p5', 'p10', 'p25', 'p50', 'p75', 'p90', 'p95', 'p99']
           x = np.arange(len(pct_labels))
@@ -702,7 +728,7 @@ jobs:
           fig.savefig(os.path.join(PANEL_DIR, 'panel-prefill-percentiles.png'), bbox_inches='tight', dpi=150)
           plt.close()
 
-          print(f"Generated 3 benchmark plots in {PANEL_DIR}")
+          print(f"Generated 4 benchmark plots in {PANEL_DIR}")
           for f in sorted(os.listdir(PANEL_DIR)):
               if f.endswith('.png'):
                   print(f"  {f}")

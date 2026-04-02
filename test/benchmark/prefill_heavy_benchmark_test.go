@@ -10,6 +10,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/common/model"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,6 +25,7 @@ import (
 type PrefillResult struct {
 	AutoscalerType  string          `json:"autoscaler_type"`
 	ReplicaTimeline []ReplicaSnap   `json:"replica_timeline"`
+	MetricsTimeline []MetricSnap    `json:"metrics_timeline"`
 	AvgReplicas     float64         `json:"avg_replicas"`
 	MaxReplicas     int32           `json:"max_replicas"`
 	AvgQueueDepth   float64         `json:"avg_queue_depth"`
@@ -40,6 +42,13 @@ type ReplicaSnap struct {
 	ElapsedSec    float64 `json:"elapsed_sec"`
 	SpecReplicas  int32   `json:"spec_replicas"`
 	ReadyReplicas int32   `json:"ready_replicas"`
+}
+
+// MetricSnap records KV cache and queue depth at a point in time.
+type MetricSnap struct {
+	ElapsedSec float64 `json:"elapsed_sec"`
+	QueueDepth float64 `json:"queue_depth"`
+	KVCache    float64 `json:"kv_cache"`
 }
 
 var prefillResults []PrefillResult
@@ -319,6 +328,7 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 
 		By("Monitoring replicas and HPA status while GuideLLM runs (~10 min)")
 		var timeline []ReplicaSnap
+		var metricsTimeline []MetricSnap
 		var maxReplicas int32 = 1
 		done := make(chan error, 1)
 
@@ -353,6 +363,23 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 					timeline = append(timeline, ReplicaSnap{ElapsedSec: elapsed, SpecReplicas: spec, ReadyReplicas: ready})
 					GinkgoWriter.Printf("  [%.0fs] replicas: spec=%d ready=%d\n", elapsed, spec, ready)
 				}
+
+				// Sample KV cache and queue depth from Prometheus
+				qdQuery := fmt.Sprintf(`avg(vllm:num_requests_waiting{namespace="%s"})`, benchCfg.LLMDNamespace)
+				kvQuery := fmt.Sprintf(`avg(vllm:kv_cache_usage_perc{namespace="%s"})`, benchCfg.LLMDNamespace)
+				snap := MetricSnap{ElapsedSec: elapsed}
+				if qdResult, _, qdErr := promClient.API().Query(ctx, qdQuery, time.Now()); qdErr == nil {
+					if vec, ok := qdResult.(model.Vector); ok && len(vec) > 0 {
+						snap.QueueDepth = float64(vec[0].Value)
+					}
+				}
+				if kvResult, _, kvErr := promClient.API().Query(ctx, kvQuery, time.Now()); kvErr == nil {
+					if vec, ok := kvResult.(model.Vector); ok && len(vec) > 0 {
+						snap.KVCache = float64(vec[0].Value)
+					}
+				}
+				metricsTimeline = append(metricsTimeline, snap)
+				GinkgoWriter.Printf("  [%.0fs] queue_depth=%.1f kv_cache=%.3f\n", elapsed, snap.QueueDepth, snap.KVCache)
 
 				// Pod-level health check for crash detection
 				pods, podErr := k8sClient.CoreV1().Pods(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{
@@ -451,6 +478,7 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 		result := PrefillResult{
 			AutoscalerType:  autoscalerType,
 			ReplicaTimeline: timeline,
+			MetricsTimeline: metricsTimeline,
 			AvgReplicas:     replicaAvg,
 			MaxReplicas:     maxReplicas,
 			AvgQueueDepth:   qdAvg,

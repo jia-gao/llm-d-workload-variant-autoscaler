@@ -12,7 +12,6 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/prometheus/common/model"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -23,18 +22,19 @@ import (
 
 // PrefillResult holds results for one prefill benchmark run (HPA or WVA).
 type PrefillResult struct {
-	AutoscalerType  string          `json:"autoscaler_type"`
-	ReplicaTimeline []ReplicaSnap   `json:"replica_timeline"`
-	MetricsTimeline []MetricSnap    `json:"metrics_timeline"`
-	AvgReplicas     float64         `json:"avg_replicas"`
-	MaxReplicas     int32           `json:"max_replicas"`
-	AvgQueueDepth   float64         `json:"avg_queue_depth"`
-	AvgKVCache      float64         `json:"avg_kv_cache"`
-	TTFT            json.RawMessage `json:"ttft,omitempty"`
-	ITL             json.RawMessage `json:"itl,omitempty"`
-	Throughput      json.RawMessage `json:"throughput,omitempty"`
-	GuideLLMRaw     json.RawMessage `json:"guidellm_raw,omitempty"`
-	DurationSec     float64         `json:"duration_sec"`
+	AutoscalerType   string          `json:"autoscaler_type"`
+	ReplicaTimeline  []ReplicaSnap   `json:"replica_timeline"`
+	MetricsTimeline  []MetricSnap    `json:"metrics_timeline"`
+	AvgReplicas      float64         `json:"avg_replicas"`
+	MaxReplicas      int32           `json:"max_replicas"`
+	AvgQueueDepth    float64         `json:"avg_queue_depth"`
+	AvgEPPQueueDepth float64         `json:"avg_epp_queue_depth"`
+	AvgKVCache       float64         `json:"avg_kv_cache"`
+	TTFT             json.RawMessage `json:"ttft,omitempty"`
+	ITL              json.RawMessage `json:"itl,omitempty"`
+	Throughput       json.RawMessage `json:"throughput,omitempty"`
+	GuideLLMRaw      json.RawMessage `json:"guidellm_raw,omitempty"`
+	DurationSec      float64         `json:"duration_sec"`
 }
 
 // ReplicaSnap records replica count at a point in time.
@@ -46,9 +46,10 @@ type ReplicaSnap struct {
 
 // MetricSnap records KV cache and queue depth at a point in time.
 type MetricSnap struct {
-	ElapsedSec float64 `json:"elapsed_sec"`
-	QueueDepth float64 `json:"queue_depth"`
-	KVCache    float64 `json:"kv_cache"`
+	ElapsedSec    float64 `json:"elapsed_sec"`
+	QueueDepth    float64 `json:"queue_depth"`
+	EPPQueueDepth float64 `json:"epp_queue_depth"`
+	KVCache       float64 `json:"kv_cache"`
 }
 
 var prefillResults []PrefillResult
@@ -225,74 +226,48 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 		GinkgoWriter.Println("--- End Diagnostics ---")
 	}
 
-	// ensureDirectModelService creates a ClusterIP service that targets the
-	// Helm-deployed model server pods directly on port 8000, bypassing the Gateway/EPP.
-	ensureDirectModelService := func() string {
-		svcName := "prefill-direct-vllm"
-		By("Ensuring direct model server service for Gateway bypass")
+	// ensureEPPConfig creates the EndpointPickerConfig ConfigMap and patches the
+	// EPP deployment to mount it with --config-file. Waits for EPP rollout.
+	ensureEPPConfig := func() {
+		const configMapName = "benchmark-epp-config"
 
-		deployment, dErr := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Get(ctx, res.DeploymentName, metav1.GetOptions{})
-		Expect(dErr).NotTo(HaveOccurred(), "Failed to get deployment for label discovery")
-		selector := deployment.Spec.Selector.MatchLabels
-		GinkgoWriter.Printf("  Using selector from deployment: %v\n", selector)
+		By("Creating EndpointPickerConfig ConfigMap")
+		err := fixtures.EnsureEndpointPickerConfig(ctx, crClient, benchCfg.LLMDNamespace, configMapName)
+		Expect(err).NotTo(HaveOccurred(), "Failed to create EndpointPickerConfig ConfigMap")
 
-		_ = k8sClient.CoreV1().Services(benchCfg.LLMDNamespace).Delete(ctx, svcName, metav1.DeleteOptions{})
-		time.Sleep(time.Second)
+		By("Discovering EPP deployment")
+		eppDeployName, findErr := fixtures.FindEPPDeployment(ctx, k8sClient, benchCfg.LLMDNamespace)
+		Expect(findErr).NotTo(HaveOccurred(), "Failed to find EPP deployment")
+		GinkgoWriter.Printf("  Found EPP deployment: %s\n", eppDeployName)
 
-		svc := &corev1.Service{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      svcName,
-				Namespace: benchCfg.LLMDNamespace,
-				Labels:    map[string]string{"test-resource": "true"},
-			},
-			Spec: corev1.ServiceSpec{
-				Type:     corev1.ServiceTypeClusterIP,
-				Selector: selector,
-				Ports: []corev1.ServicePort{{
-					Name:     "http",
-					Port:     8000,
-					Protocol: corev1.ProtocolTCP,
-				}},
-			},
-		}
-		_, createErr := k8sClient.CoreV1().Services(benchCfg.LLMDNamespace).Create(ctx, svc, metav1.CreateOptions{})
-		Expect(createErr).NotTo(HaveOccurred(), "Failed to create direct model server service")
-
-		directURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:8000", svcName, benchCfg.LLMDNamespace)
-		GinkgoWriter.Printf("  Direct model server URL: %s\n", directURL)
-		return directURL
+		By("Patching EPP deployment with --config-file volume mount")
+		patchErr := fixtures.PatchEPPWithConfigFile(ctx, k8sClient, benchCfg.LLMDNamespace, eppDeployName, configMapName)
+		Expect(patchErr).NotTo(HaveOccurred(), "Failed to patch EPP deployment with config-file")
+		GinkgoWriter.Println("  EPP deployment patched and rolled out successfully")
 	}
 
 	runPrefillBenchmark := func(autoscalerType string) {
 		ensureInfraDeploymentReady()
+		ensureEPPConfig()
 		dumpInfrastructureDiagnostics()
 
 		gatewayURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d",
 			benchCfg.GatewayServiceName, benchCfg.LLMDNamespace, benchCfg.GatewayServicePort)
 
-		By("Verifying Gateway connectivity (informational)")
-		gwErr := fixtures.VerifyGatewayConnectivity(ctx, k8sClient, benchCfg.LLMDNamespace, gatewayURL, benchCfg.ModelID)
+		By("Verifying Gateway connectivity (required — traffic must flow through EPP)")
+		Eventually(func(g Gomega) {
+			gwErr := fixtures.VerifyGatewayConnectivity(ctx, k8sClient, benchCfg.LLMDNamespace, gatewayURL, benchCfg.ModelID)
+			g.Expect(gwErr).NotTo(HaveOccurred(), "Gateway not yet reachable")
+		}, 5*time.Minute, 20*time.Second).Should(Succeed(), "Gateway connectivity check failed — EPP/Gateway is not routing traffic correctly. Cannot bypass; traffic must flow through EPP to capture queue metrics.")
 
-		var targetURL string
-		if gwErr != nil {
-			GinkgoWriter.Printf("WARNING: Gateway connectivity check failed: %v\n", gwErr)
-			GinkgoWriter.Println("Falling back to direct model server connection (bypassing Gateway/EPP)")
-			targetURL = ensureDirectModelService()
-
-			By("Verifying direct model server connectivity (with retries)")
-			Eventually(func(g Gomega) {
-				directErr := fixtures.VerifyGatewayConnectivity(ctx, k8sClient, benchCfg.LLMDNamespace, targetURL, benchCfg.ModelID)
-				g.Expect(directErr).NotTo(HaveOccurred(), "Direct model server not yet reachable")
-			}, 3*time.Minute, 20*time.Second).Should(Succeed(), "Direct model server connectivity check failed after retries — backend is truly unreachable")
-		} else {
-			GinkgoWriter.Println("Gateway connectivity check passed — using Gateway URL")
-			targetURL = gatewayURL
-		}
+		targetURL := gatewayURL
+		GinkgoWriter.Printf("  Using Gateway URL: %s\n", targetURL)
 
 		By("Checking Prometheus metric availability before load")
 		for _, q := range []string{
 			fmt.Sprintf(`vllm:kv_cache_usage_perc{namespace="%s"}`, benchCfg.LLMDNamespace),
 			fmt.Sprintf(`vllm:num_requests_waiting{namespace="%s"}`, benchCfg.LLMDNamespace),
+			fmt.Sprintf(`inference_extension_flow_control_queue_size{namespace="%s"}`, benchCfg.LLMDNamespace),
 			fmt.Sprintf(`kube_deployment_status_replicas{deployment="%s",namespace="%s"}`, res.DeploymentName, benchCfg.LLMDNamespace),
 		} {
 			val, err := QueryRangeAvg(promClient.API(), q, time.Now().Add(-2*time.Minute), time.Now(), 30*time.Second)
@@ -364,9 +339,10 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 					GinkgoWriter.Printf("  [%.0fs] replicas: spec=%d ready=%d\n", elapsed, spec, ready)
 				}
 
-				// Sample KV cache and queue depth from Prometheus
+				// Sample KV cache, vLLM queue depth, and EPP queue depth from Prometheus
 				qdQuery := fmt.Sprintf(`avg(vllm:num_requests_waiting{namespace="%s"})`, benchCfg.LLMDNamespace)
 				kvQuery := fmt.Sprintf(`avg(vllm:kv_cache_usage_perc{namespace="%s"})`, benchCfg.LLMDNamespace)
+				eppQDQuery := fmt.Sprintf(`sum(inference_extension_flow_control_queue_size{namespace="%s"})`, benchCfg.LLMDNamespace)
 				snap := MetricSnap{ElapsedSec: elapsed}
 				if qdResult, _, qdErr := promClient.API().Query(ctx, qdQuery, time.Now()); qdErr == nil {
 					if vec, ok := qdResult.(model.Vector); ok && len(vec) > 0 {
@@ -378,8 +354,13 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 						snap.KVCache = float64(vec[0].Value)
 					}
 				}
+				if eppResult, _, eppErr := promClient.API().Query(ctx, eppQDQuery, time.Now()); eppErr == nil {
+					if vec, ok := eppResult.(model.Vector); ok && len(vec) > 0 {
+						snap.EPPQueueDepth = float64(vec[0].Value)
+					}
+				}
 				metricsTimeline = append(metricsTimeline, snap)
-				GinkgoWriter.Printf("  [%.0fs] queue_depth=%.1f kv_cache=%.3f\n", elapsed, snap.QueueDepth, snap.KVCache)
+				GinkgoWriter.Printf("  [%.0fs] queue_depth=%.1f epp_queue=%.1f kv_cache=%.3f\n", elapsed, snap.QueueDepth, snap.EPPQueueDepth, snap.KVCache)
 
 				// Pod-level health check for crash detection
 				pods, podErr := k8sClient.CoreV1().Pods(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{
@@ -475,14 +456,24 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 			GinkgoWriter.Printf("Warning: failed to query KV cache avg: %v\n", err)
 		}
 
+		eppQDAvg, err := QueryRangeAvg(
+			promClient.API(),
+			fmt.Sprintf(`sum(inference_extension_flow_control_queue_size{namespace="%s"})`, benchCfg.LLMDNamespace),
+			loadStart, loadEnd, 30*time.Second,
+		)
+		if err != nil {
+			GinkgoWriter.Printf("Warning: failed to query EPP queue depth avg: %v\n", err)
+		}
+
 		result := PrefillResult{
-			AutoscalerType:  autoscalerType,
-			ReplicaTimeline: timeline,
-			MetricsTimeline: metricsTimeline,
-			AvgReplicas:     replicaAvg,
-			MaxReplicas:     maxReplicas,
-			AvgQueueDepth:   qdAvg,
-			AvgKVCache:      kvAvg,
+			AutoscalerType:   autoscalerType,
+			ReplicaTimeline:  timeline,
+			MetricsTimeline:  metricsTimeline,
+			AvgReplicas:      replicaAvg,
+			MaxReplicas:      maxReplicas,
+			AvgQueueDepth:    qdAvg,
+			AvgEPPQueueDepth: eppQDAvg,
+			AvgKVCache:       kvAvg,
 			TTFT:            ttftJSON,
 			ITL:             itlJSON,
 			Throughput:      throughputJSON,
@@ -498,6 +489,7 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 		GinkgoWriter.Printf("  Max Replicas:    %d\n", maxReplicas)
 		GinkgoWriter.Printf("  Avg Replicas:    %.2f\n", replicaAvg)
 		GinkgoWriter.Printf("  Avg Queue Depth: %.2f\n", qdAvg)
+		GinkgoWriter.Printf("  Avg EPP Queue:   %.2f\n", eppQDAvg)
 		GinkgoWriter.Printf("  Avg KV Cache:    %.3f\n", kvAvg)
 		if ttftJSON != nil {
 			GinkgoWriter.Printf("  TTFT:            %s\n", string(ttftJSON))
@@ -549,8 +541,26 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 			time.Sleep(30 * time.Second)
 			ensureInfraDeploymentReady()
 
+			By("Scaling deployment to 1 replica before WVA test (clean baseline)")
+			scale, err := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).GetScale(ctx, res.DeploymentName, metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			if scale.Spec.Replicas != 1 {
+				scale.Spec.Replicas = 1
+				_, err = k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).UpdateScale(ctx, res.DeploymentName, scale, metav1.UpdateOptions{})
+				Expect(err).NotTo(HaveOccurred())
+				GinkgoWriter.Printf("Scaled deployment %s to 1 replica\n", res.DeploymentName)
+			}
+			Eventually(func(g Gomega) {
+				dep, depErr := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Get(ctx, res.DeploymentName, metav1.GetOptions{})
+				g.Expect(depErr).NotTo(HaveOccurred())
+				g.Expect(dep.Status.ReadyReplicas).To(Equal(int32(1)), "Deployment should have exactly 1 ready replica")
+			}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("Waiting for stale Prometheus metrics to settle (60s)")
+			time.Sleep(60 * time.Second)
+
 			By("Creating VariantAutoscaling resource (Scale Up: 0s, Scale Down: 240s)")
-			err := fixtures.EnsureVariantAutoscaling(
+			err = fixtures.EnsureVariantAutoscaling(
 				ctx, crClient, benchCfg.LLMDNamespace, res.VAName, res.DeploymentName,
 				benchCfg.ModelID, benchCfg.AcceleratorType, 30.0, benchCfg.ControllerInstance,
 				fixtures.WithMinReplicas(1),
@@ -566,7 +576,7 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 				},
 				ScaleDown: &autoscalingv2.HPAScalingRules{
 					StabilizationWindowSeconds: ptr.To(int32(240)),
-					Policies:                   []autoscalingv2.HPAScalingPolicy{{Type: autoscalingv2.PodsScalingPolicy, Value: 1, PeriodSeconds: 60}},
+					Policies:                   []autoscalingv2.HPAScalingPolicy{{Type: autoscalingv2.PodsScalingPolicy, Value: 10, PeriodSeconds: 150}},
 				},
 			}
 

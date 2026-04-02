@@ -12,7 +12,6 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/prometheus/common/model"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -227,99 +226,41 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 		GinkgoWriter.Println("--- End Diagnostics ---")
 	}
 
-	// ensureEPPConfig is available but NOT called during benchmarks.
-	// The deploy script already enables flow control via env var. Patching
-	// the EPP with --config-file on v0.5.0-rc.1 causes Gateway routing to
-	// break (HTTP 500). Uncomment the call in runPrefillBenchmark when the
-	// EPP image supports --config-file alongside the env var.
-	_ = func() {
-		const configMapName = "benchmark-epp-config"
-
-		By("Creating EndpointPickerConfig ConfigMap")
-		err := fixtures.EnsureEndpointPickerConfig(ctx, crClient, benchCfg.LLMDNamespace, configMapName)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create EndpointPickerConfig ConfigMap")
-
+	// ensureEPPConfig patches the EPP with --config-text containing the
+	// EndpointPickerConfig (flowControl + scorer weights 2/2/3). It also
+	// removes the deprecated ENABLE_EXPERIMENTAL_FLOW_CONTROL_LAYER env
+	// var to avoid conflicts — the config-text featureGates supersede it.
+	ensureEPPConfig := func() {
 		By("Discovering EPP deployment")
 		eppDeployName, findErr := fixtures.FindEPPDeployment(ctx, k8sClient, benchCfg.LLMDNamespace)
 		Expect(findErr).NotTo(HaveOccurred(), "Failed to find EPP deployment")
 		GinkgoWriter.Printf("  Found EPP deployment: %s\n", eppDeployName)
 
-		By("Patching EPP deployment with --config-file volume mount")
-		patchErr := fixtures.PatchEPPWithConfigFile(ctx, k8sClient, benchCfg.LLMDNamespace, eppDeployName, configMapName)
-		Expect(patchErr).NotTo(HaveOccurred(), "Failed to patch EPP deployment with config-file")
+		By("Patching EPP deployment with --config-text (scorer weights 2/2/3, flowControl)")
+		patchErr := fixtures.PatchEPPWithConfigText(ctx, k8sClient, benchCfg.LLMDNamespace, eppDeployName)
+		Expect(patchErr).NotTo(HaveOccurred(), "Failed to patch EPP deployment with config-text")
 		GinkgoWriter.Println("  EPP deployment patched and rolled out successfully")
-	}
 
-	// ensureDirectModelService creates a ClusterIP service that targets the
-	// Helm-deployed model server pods directly on port 8000, bypassing the Gateway/EPP.
-	ensureDirectModelService := func() string {
-		svcName := "prefill-direct-vllm"
-		By("Ensuring direct model server service for Gateway bypass")
-
-		deployment, dErr := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Get(ctx, res.DeploymentName, metav1.GetOptions{})
-		Expect(dErr).NotTo(HaveOccurred(), "Failed to get deployment for label discovery")
-		selector := deployment.Spec.Selector.MatchLabels
-		GinkgoWriter.Printf("  Using selector from deployment: %v\n", selector)
-
-		_ = k8sClient.CoreV1().Services(benchCfg.LLMDNamespace).Delete(ctx, svcName, metav1.DeleteOptions{})
-		time.Sleep(time.Second)
-
-		svc := &corev1.Service{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      svcName,
-				Namespace: benchCfg.LLMDNamespace,
-				Labels:    map[string]string{"test-resource": "true"},
-			},
-			Spec: corev1.ServiceSpec{
-				Type:     corev1.ServiceTypeClusterIP,
-				Selector: selector,
-				Ports: []corev1.ServicePort{{
-					Name:     "http",
-					Port:     8000,
-					Protocol: corev1.ProtocolTCP,
-				}},
-			},
-		}
-		_, createErr := k8sClient.CoreV1().Services(benchCfg.LLMDNamespace).Create(ctx, svc, metav1.CreateOptions{})
-		Expect(createErr).NotTo(HaveOccurred(), "Failed to create direct model server service")
-
-		directURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:8000", svcName, benchCfg.LLMDNamespace)
-		GinkgoWriter.Printf("  Direct model server URL: %s\n", directURL)
-		return directURL
+		By("Waiting for Gateway to become healthy after EPP rollout")
+		Eventually(func(g Gomega) {
+			gwURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d",
+				benchCfg.GatewayServiceName, benchCfg.LLMDNamespace, benchCfg.GatewayServicePort)
+			err := fixtures.VerifyGatewayConnectivity(ctx, k8sClient, benchCfg.LLMDNamespace, gwURL, benchCfg.ModelID)
+			g.Expect(err).NotTo(HaveOccurred(), "Gateway not ready yet after EPP rollout")
+		}, 5*time.Minute, 15*time.Second).Should(Succeed(), "Gateway failed to become healthy after EPP config patch")
+		GinkgoWriter.Println("  Gateway is healthy after EPP config update")
 	}
 
 	runPrefillBenchmark := func(autoscalerType string) {
 		ensureInfraDeploymentReady()
-		// NOTE: We intentionally do NOT call ensureEPPConfig() here.
-		// The deploy script (install.sh) already enables flow control via
-		// ENABLE_EXPERIMENTAL_FLOW_CONTROL_LAYER=true env var on the EPP.
-		// Patching the EPP with --config-file causes it to restart and break
-		// Gateway routing (HTTP 500). The scorer weights use defaults.
+		ensureEPPConfig()
 		dumpInfrastructureDiagnostics()
 
 		gatewayURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d",
 			benchCfg.GatewayServiceName, benchCfg.LLMDNamespace, benchCfg.GatewayServicePort)
 
-		By("Verifying Gateway connectivity (prefer Gateway for EPP queue metrics)")
-		gwErr := fixtures.VerifyGatewayConnectivity(ctx, k8sClient, benchCfg.LLMDNamespace, gatewayURL, benchCfg.ModelID)
-
-		var targetURL string
-		if gwErr != nil {
-			GinkgoWriter.Printf("WARNING: Gateway connectivity check failed: %v\n", gwErr)
-			GinkgoWriter.Println("WARNING: Falling back to direct model server connection (bypassing Gateway/EPP)")
-			GinkgoWriter.Println("WARNING: EPP queue depth metrics will show 0 since traffic does not flow through EPP")
-			targetURL = ensureDirectModelService()
-
-			By("Verifying direct model server connectivity (with retries)")
-			Eventually(func(g Gomega) {
-				directErr := fixtures.VerifyGatewayConnectivity(ctx, k8sClient, benchCfg.LLMDNamespace, targetURL, benchCfg.ModelID)
-				g.Expect(directErr).NotTo(HaveOccurred(), "Direct model server not yet reachable")
-			}, 3*time.Minute, 20*time.Second).Should(Succeed(), "Direct model server connectivity check failed after retries — backend is truly unreachable")
-		} else {
-			GinkgoWriter.Println("Gateway connectivity check passed — using Gateway URL (EPP queue metrics will be captured)")
-			targetURL = gatewayURL
-		}
-		GinkgoWriter.Printf("  Using target URL: %s\n", targetURL)
+		targetURL := gatewayURL
+		GinkgoWriter.Printf("  Using Gateway URL (traffic flows through EPP): %s\n", targetURL)
 
 		By("Checking Prometheus metric availability before load")
 		for _, q := range []string{

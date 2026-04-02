@@ -9,20 +9,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const eppConfigKey = "config.yaml"
-
-// EnsureEndpointPickerConfig creates or updates the EndpointPickerConfig for the benchmark
-func EnsureEndpointPickerConfig(ctx context.Context, crClient client.Client, namespace, name string) error {
-	eppConfig := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-		},
-		Data: map[string]string{
-			eppConfigKey: `apiVersion: inference.networking.x-k8s.io/v1alpha1
+// EndpointPickerConfigYAML is the full config text passed via --config-text.
+// It enables flowControl and sets scorer weights: queue=2, kv-cache=2, prefix-cache=3.
+const EndpointPickerConfigYAML = `apiVersion: inference.networking.x-k8s.io/v1alpha1
 kind: EndpointPickerConfig
 featureGates:
 - flowControl
@@ -38,81 +29,45 @@ schedulingProfiles:
   - pluginRef: kv-cache-utilization-scorer
     weight: 2
   - pluginRef: prefix-cache-scorer
-    weight: 3`,
-		},
-	}
+    weight: 3`
 
-	existing := &corev1.ConfigMap{}
-	err := crClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, existing)
-	if err == nil {
-		eppConfig.SetResourceVersion(existing.GetResourceVersion())
-		if err := crClient.Update(ctx, eppConfig); err != nil {
-			return fmt.Errorf("failed to update EndpointPickerConfig ConfigMap: %w", err)
-		}
-		return nil
-	}
-
-	if err := crClient.Create(ctx, eppConfig); err != nil {
-		return fmt.Errorf("failed to create EndpointPickerConfig ConfigMap: %w", err)
-	}
-
-	return nil
-}
-
-// PatchEPPWithConfigFile patches the EPP deployment to mount the EndpointPickerConfig
-// ConfigMap and pass --config-file to the container. It reads the existing container
-// args and appends the flag so that all original flags (--pool-name, --grpc-port, etc.)
-// are preserved. It then waits for the rollout to complete.
-func PatchEPPWithConfigFile(ctx context.Context, k8sClient *kubernetes.Clientset, namespace, eppDeploymentName, configMapName string) error {
+// PatchEPPWithConfigText patches the EPP deployment to use --config-text with
+// the EndpointPickerConfig YAML inline. It also removes the deprecated
+// ENABLE_EXPERIMENTAL_FLOW_CONTROL_LAYER env var to avoid conflicts (the
+// config-text featureGates supersede it). This approach avoids ConfigMap
+// volume mounts which simplifies the patch. Waits for the rollout to complete.
+func PatchEPPWithConfigText(ctx context.Context, k8sClient *kubernetes.Clientset, namespace, eppDeploymentName string) error {
 	dep, err := k8sClient.AppsV1().Deployments(namespace).Get(ctx, eppDeploymentName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to get EPP deployment %s: %w", eppDeploymentName, err)
 	}
 
-	const volumeName = "epp-config"
-	const mountPath = "/etc/epp"
-	configFilePath := mountPath + "/" + eppConfigKey
-	configFileArg := "--config-file=" + configFilePath
+	c := &dep.Spec.Template.Spec.Containers[0]
 
-	// Check if already patched (volume already exists)
-	for _, v := range dep.Spec.Template.Spec.Volumes {
-		if v.Name == volumeName {
+	// Check if already patched
+	for _, a := range c.Args {
+		if strings.HasPrefix(a, "--config-text=") {
 			return nil
 		}
 	}
 
-	// Add volume
-	dep.Spec.Template.Spec.Volumes = append(dep.Spec.Template.Spec.Volumes, corev1.Volume{
-		Name: volumeName,
-		VolumeSource: corev1.VolumeSource{
-			ConfigMap: &corev1.ConfigMapVolumeSource{
-				LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
-			},
-		},
-	})
-
-	// Add volumeMount and --config-file arg to the first container, preserving existing args
-	c := &dep.Spec.Template.Spec.Containers[0]
-	c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
-		Name:      volumeName,
-		MountPath: mountPath,
-		ReadOnly:  true,
-	})
-
-	hasArg := false
-	for _, a := range c.Args {
-		if strings.HasPrefix(a, "--config-file=") {
-			hasArg = true
-			break
+	// Remove the ENABLE_EXPERIMENTAL_FLOW_CONTROL_LAYER env var — the config
+	// text's featureGates: [flowControl] supersedes it and having both causes
+	// the EPP to malfunction on v0.5.0-rc.1.
+	filtered := make([]corev1.EnvVar, 0, len(c.Env))
+	for _, e := range c.Env {
+		if e.Name != "ENABLE_EXPERIMENTAL_FLOW_CONTROL_LAYER" {
+			filtered = append(filtered, e)
 		}
 	}
-	if !hasArg {
-		c.Args = append(c.Args, configFileArg)
-	}
+	c.Env = filtered
+
+	// Append --config-text with inline YAML (preserves all existing args)
+	c.Args = append(c.Args, "--config-text="+EndpointPickerConfigYAML)
 
 	_, err = k8sClient.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to update EPP deployment with config-file: %w", err)
+		return fmt.Errorf("failed to update EPP deployment with config-text: %w", err)
 	}
 
 	// Wait for rollout: new pods ready

@@ -954,6 +954,33 @@ deploy_llm_d_infrastructure() {
       fi
     fi
 
+    # Migrate InferencePool API version from v1alpha2 to v1 if the cluster supports it.
+    # The v0.3.0 llm-d guide creates InferencePool with inference.networking.x-k8s.io/v1alpha2,
+    # but Istio 1.29+ only watches inference.networking.k8s.io/v1 InferencePool resources.
+    # Without this migration, Istio ignores the InferencePool and Envoy returns cluster_not_found.
+    INFPOOL_MIGRATED_TO_V1=false
+    local gaie_values_file=""
+    for f in gaie-*/values.yaml; do
+        [ -f "$f" ] && gaie_values_file="$f" && break
+    done
+    if [ -n "$gaie_values_file" ]; then
+        local current_pool_api
+        current_pool_api=$(yq eval '.inferencePool.apiVersion // ""' "$gaie_values_file" 2>/dev/null)
+        if [ "$current_pool_api" == "inference.networking.x-k8s.io/v1alpha2" ] && \
+           kubectl get crd inferencepools.inference.networking.k8s.io &>/dev/null 2>&1; then
+            local target_port
+            target_port=$(yq eval '.inferencePool.targetPortNumber // 8000' "$gaie_values_file" 2>/dev/null)
+            log_info "Migrating InferencePool API: v1alpha2 -> v1 (port=${target_port})"
+            yq eval "
+                .inferencePool.apiVersion = \"inference.networking.k8s.io\" |
+                del(.inferencePool.targetPortNumber) |
+                .inferencePool.targetPorts = [{\"number\": ${target_port}}]
+            " -i "$gaie_values_file"
+            INFPOOL_MIGRATED_TO_V1=true
+            log_success "Patched $gaie_values_file for inference.networking.k8s.io/v1"
+        fi
+    fi
+
     # Deploy llm-d core components
     log_info "Deploying llm-d core components"
     # When DEPLOY_WVA is true, skip WVA in helmfile — install.sh deploys it
@@ -1011,15 +1038,28 @@ deploy_llm_d_infrastructure() {
     # (llm-d-infra reusable-nightly-e2e-openshift.yaml) via the guide_name input.
     if [ -f httproute.yaml ]; then
         local rn="${RELEASE_NAME_POSTFIX:-}"
+        local httproute_patches=""
+
         if [ -n "$rn" ]; then
             local gw_name="infra-${rn}-inference-gateway"
             local pool_name="gaie-${rn}"
-            log_info "Applying HTTPRoute (gateway=$gw_name, pool=$pool_name)"
-            if ! yq eval "
-                .spec.parentRefs[0].name = \"${gw_name}\" |
-                .spec.rules[0].backendRefs[0].name = \"${pool_name}\"
-            " httproute.yaml | kubectl apply -f - -n ${LLMD_NS}; then
-                log_error "Failed to apply templated HTTPRoute for gateway=${gw_name}, pool=${pool_name}"
+            httproute_patches=".spec.parentRefs[0].name = \"${gw_name}\" | .spec.rules[0].backendRefs[0].name = \"${pool_name}\""
+        fi
+
+        # When InferencePool was migrated to v1, the backendRef API group must match.
+        if [ "$INFPOOL_MIGRATED_TO_V1" == "true" ]; then
+            local group_patch='.spec.rules[0].backendRefs[0].group = "inference.networking.k8s.io"'
+            if [ -n "$httproute_patches" ]; then
+                httproute_patches="${httproute_patches} | ${group_patch}"
+            else
+                httproute_patches="${group_patch}"
+            fi
+        fi
+
+        if [ -n "$httproute_patches" ]; then
+            log_info "Applying HTTPRoute (with patches: ${httproute_patches})"
+            if ! yq eval "$httproute_patches" httproute.yaml | kubectl apply -f - -n ${LLMD_NS}; then
+                log_error "Failed to apply patched HTTPRoute"
                 exit 1
             fi
         else

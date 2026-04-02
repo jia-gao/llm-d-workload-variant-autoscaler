@@ -266,25 +266,25 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 		if crClient != nil {
 			poolList := &unstructured.UnstructuredList{}
 			poolList.SetGroupVersionKind(schema.GroupVersionKind{
-				Group: "inference.networking.x-k8s.io", Version: "v1alpha2", Kind: "InferencePoolList",
+				Group: "inference.networking.k8s.io", Version: "v1", Kind: "InferencePoolList",
 			})
 			if err := crClient.List(ctx, poolList, client.InNamespace(benchCfg.LLMDNamespace)); err == nil {
 				for _, item := range poolList.Items {
 					data, _ := json.MarshalIndent(item.Object, "  ", "  ")
-					GinkgoWriter.Printf("  InferencePool/%s:\n  %s\n", item.GetName(), string(data))
+					GinkgoWriter.Printf("  InferencePool/%s (v1):\n  %s\n", item.GetName(), string(data))
 				}
 			} else {
-				GinkgoWriter.Printf("  Failed to list InferencePool (v1alpha2): %v\n", err)
+				GinkgoWriter.Printf("  Failed to list InferencePool (v1): %v\n", err)
 				poolList.SetGroupVersionKind(schema.GroupVersionKind{
-					Group: "inference.networking.k8s.io", Version: "v1", Kind: "InferencePoolList",
+					Group: "inference.networking.x-k8s.io", Version: "v1alpha2", Kind: "InferencePoolList",
 				})
 				if err2 := crClient.List(ctx, poolList, client.InNamespace(benchCfg.LLMDNamespace)); err2 == nil {
 					for _, item := range poolList.Items {
 						data, _ := json.MarshalIndent(item.Object, "  ", "  ")
-						GinkgoWriter.Printf("  InferencePool/%s:\n  %s\n", item.GetName(), string(data))
+						GinkgoWriter.Printf("  InferencePool/%s (v1alpha2):\n  %s\n", item.GetName(), string(data))
 					}
 				} else {
-					GinkgoWriter.Printf("  Failed to list InferencePool (v1): %v\n", err2)
+					GinkgoWriter.Printf("  Failed to list InferencePool (v1alpha2): %v\n", err2)
 				}
 			}
 

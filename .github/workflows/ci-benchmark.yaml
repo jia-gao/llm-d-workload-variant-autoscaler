@@ -1,8 +1,9 @@
 name: CI - Benchmark
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch'
-    && format('Benchmark: {0} | {1}',
+    && format('Benchmark: {0} | {1} | {2}',
         inputs.platform,
+        inputs.model_id || 'unsloth/Meta-Llama-3.1-8B',
         github.ref_name)
     || format('Benchmark: PR #{0} | {1}',
         github.event.issue.number,
@@ -32,6 +33,11 @@ on:
         default: 'kind'
         type: choice
         options: [kind, openshift]
+      model_id:
+        description: 'Model to benchmark (HuggingFace ID)'
+        required: false
+        default: 'unsloth/Meta-Llama-3.1-8B'
+        type: string
 
 jobs:
   gate:
@@ -456,7 +462,7 @@ jobs:
       pull-requests: write
       actions: read
     env:
-      MODEL_ID: 'unsloth/Meta-Llama-3.1-8B'
+      MODEL_ID: ${{ inputs.model_id || 'unsloth/Meta-Llama-3.1-8B' }}
       ACCELERATOR_TYPE: 'H100'
       GOTOOLCHAIN: auto
       LLMD_NAMESPACE: llm-d-benchmark-pr-${{ needs.gate.outputs.pr_number || github.run_id }}
@@ -739,6 +745,157 @@ jobs:
           for f in sorted(os.listdir(PANEL_DIR)):
               if f.endswith('.png'):
                   print(f"  {f}")
+
+          # --- Generate per-autoscaler PDF reports (colleague format) ---
+          from matplotlib.backends.backend_pdf import PdfPages
+          import textwrap
+
+          model_id = os.environ.get('MODEL_ID', 'unknown')
+          model_short = model_id.split('/')[-1]
+
+          for data in [hpa, wva]:
+              atype = data['autoscaler_type']
+              pdf_path = os.path.join(PANEL_DIR, f'report_{atype.lower()}_{model_short}.pdf')
+              with PdfPages(pdf_path) as pdf:
+                  # Page 1: Configuration & Summary
+                  fig, ax = plt.subplots(figsize=(11, 8.5))
+                  ax.axis('off')
+                  lines = []
+                  lines.append(f"{'='*80}")
+                  lines.append(f"AUTOSCALER TYPE : {'Workload Variant Autoscaler (WVA)' if atype == 'WVA' else 'Direct HPA (Legacy) Baseline'}")
+                  lines.append(f"MODEL : {model_id}")
+                  lines.append(f"{'='*80}")
+                  lines.append(f"Benchmark Load Generator Configuration")
+                  lines.append(f"{'='*80}")
+                  lines.append(f"Profile: poisson @ 20 req/s")
+                  lines.append(f"Prompt tokens: 4000 | Output tokens: 1000")
+                  lines.append(f"Max seconds: 600 | Seed: 42")
+                  lines.append(f"{'='*80}")
+                  lines.append(f"EPP Configuration: flowControl, queue-scorer=2, kv-cache=2, prefix-cache=3")
+                  lines.append(f"{'='*80}")
+                  lines.append(f"Results Summary")
+                  lines.append(f"{'='*80}")
+                  tp_obj = data.get('throughput', {})
+                  ttft_obj = data.get('ttft', {})
+                  itl_obj = data.get('itl', {})
+                  tp_mean = tp_obj.get('mean', 0) if isinstance(tp_obj, dict) else 0
+                  ttft_mean = ttft_obj.get('mean', 0) if isinstance(ttft_obj, dict) else 0
+                  ttft_p99 = ttft_obj.get('percentiles', {}).get('p99', 0) if isinstance(ttft_obj, dict) else 0
+                  itl_mean = itl_obj.get('mean', 0) if isinstance(itl_obj, dict) else 0
+                  itl_p99 = itl_obj.get('percentiles', {}).get('p99', 0) if isinstance(itl_obj, dict) else 0
+                  completed = ttft_obj.get('count', 0) if isinstance(ttft_obj, dict) else 0
+                  lines.append(f"Throughput (mean):    {tp_mean:.1f} tok/s")
+                  lines.append(f"Completed Requests:   {completed}")
+                  lines.append(f"Max Replicas:         {data['max_replicas']}")
+                  lines.append(f"Avg Replicas:         {data['avg_replicas']:.2f}")
+                  lines.append(f"Avg vLLM Queue:       {data['avg_queue_depth']:.1f}")
+                  lines.append(f"Avg EPP Queue:        {data.get('avg_epp_queue_depth', 0):.1f}")
+                  lines.append(f"Avg KV Cache:         {data['avg_kv_cache']:.4f}")
+                  lines.append(f"TTFT mean:            {ttft_mean/1000:.1f}s | P99: {ttft_p99/1000:.1f}s")
+                  lines.append(f"ITL mean:             {itl_mean:.2f}ms | P99: {itl_p99:.2f}ms")
+                  lines.append(f"Duration:             {data['duration_sec']:.0f}s")
+                  ax.text(0.05, 0.95, '\n'.join(lines), transform=ax.transAxes, fontsize=9,
+                          verticalalignment='top', fontfamily='monospace',
+                          bbox=dict(boxstyle='round', facecolor='#f0f0f0', alpha=0.8))
+                  fig.suptitle(f'{atype} Benchmark Report — {model_short}', fontsize=14, fontweight='bold')
+                  pdf.savefig(fig, bbox_inches='tight')
+                  plt.close()
+
+                  # Page 2: Time-series charts (KV Cache, Queue, Replicas, EPP Queue)
+                  mt = data.get('metrics_timeline', [])
+                  tl = data.get('replica_timeline', [])
+                  if mt and tl:
+                      fig, axes = plt.subplots(4, 1, figsize=(11, 14), sharex=True)
+                      fig.suptitle(f'{atype} — Metrics Over Time ({model_short})', fontsize=14, fontweight='bold')
+                      color = WVA_C if atype == 'WVA' else HPA_C
+                      times_m = [s['elapsed_sec'] for s in mt]
+                      kv = [s['kv_cache']*100 for s in mt]
+                      qd = [s['queue_depth'] for s in mt]
+                      epp = [s.get('epp_queue_depth', 0) for s in mt]
+                      times_r = [s['elapsed_sec'] for s in tl]
+                      ready = [s['ready_replicas'] for s in tl]
+
+                      axes[0].plot(times_m, kv, color=color, linewidth=2)
+                      axes[0].fill_between(times_m, kv, alpha=0.15, color=color)
+                      axes[0].set_ylabel('KV Cache Usage (%)')
+                      axes[0].set_title('KV Cache Usage Over Time')
+
+                      axes[1].plot(times_m, qd, color=color, linewidth=2)
+                      axes[1].fill_between(times_m, qd, alpha=0.15, color=color)
+                      axes[1].set_ylabel('Requests Waiting')
+                      axes[1].set_title('Number of Requests Waiting Over Time')
+
+                      axes[2].step(times_r, ready, where='post', color=color, linewidth=2.5, label='Actual Replicas')
+                      axes[2].fill_between(times_r, ready, step='post', alpha=0.1, color=color)
+                      ax2b = axes[2].twinx()
+                      ax2b.plot(times_m, epp, color='#3498db', linewidth=1.5, alpha=0.7, label='EPP Queue')
+                      ax2b.set_ylabel('EPP Queue Size', color='#3498db')
+                      axes[2].set_ylabel('Replica Count')
+                      axes[2].set_title('Replica Count & EPP Queue Over Time')
+                      axes[2].yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+                      axes[2].legend(loc='upper left', fontsize=9)
+                      ax2b.legend(loc='upper right', fontsize=9)
+
+                      axes[3].plot(times_m, epp, color='#3498db', linewidth=2)
+                      axes[3].fill_between(times_m, epp, alpha=0.15, color='#3498db')
+                      axes[3].set_ylabel('EPP Queue Size')
+                      axes[3].set_xlabel('Time (seconds)')
+                      axes[3].set_title('EPP Flow Control Queue Size Over Time')
+
+                      fig.tight_layout()
+                      pdf.savefig(fig, bbox_inches='tight')
+                      plt.close()
+
+                  # Page 3: GuideLLM metrics (TTFT, ITL, Throughput distributions)
+                  has_pcts = isinstance(ttft_obj, dict) and 'percentiles' in ttft_obj
+                  if has_pcts:
+                      fig, axes = plt.subplots(2, 2, figsize=(11, 8.5))
+                      fig.suptitle(f'{atype} — GuideLLM Latency & Throughput ({model_short})', fontsize=14, fontweight='bold')
+                      pct_keys = ['p05','p10','p25','p50','p75','p90','p95','p99']
+                      pct_labels = ['p5','p10','p25','p50','p75','p90','p95','p99']
+                      x = np.arange(len(pct_labels))
+
+                      ttft_vals = [ttft_obj['percentiles'][k]/1000 for k in pct_keys]
+                      axes[0,0].bar(x, ttft_vals, color=color, alpha=0.85)
+                      axes[0,0].set_xticks(x); axes[0,0].set_xticklabels(pct_labels, fontsize=8)
+                      axes[0,0].set_title('TTFT Percentiles', fontweight='bold')
+                      axes[0,0].set_ylabel('seconds')
+                      axes[0,0].axhline(y=ttft_mean/1000, color='red', linestyle='--', label=f'mean={ttft_mean/1000:.1f}s')
+                      axes[0,0].legend(fontsize=8)
+
+                      itl_vals = [itl_obj['percentiles'][k] for k in pct_keys]
+                      axes[0,1].bar(x, itl_vals, color=color, alpha=0.85)
+                      axes[0,1].set_xticks(x); axes[0,1].set_xticklabels(pct_labels, fontsize=8)
+                      axes[0,1].set_title('ITL Percentiles', fontweight='bold')
+                      axes[0,1].set_ylabel('ms')
+                      axes[0,1].axhline(y=itl_mean, color='red', linestyle='--', label=f'mean={itl_mean:.2f}ms')
+                      axes[0,1].legend(fontsize=8)
+
+                      tp_vals = [tp_obj['percentiles'][k] for k in pct_keys]
+                      axes[1,0].bar(x, tp_vals, color=color, alpha=0.85)
+                      axes[1,0].set_xticks(x); axes[1,0].set_xticklabels(pct_labels, fontsize=8)
+                      axes[1,0].set_title('Throughput Percentiles', fontweight='bold')
+                      axes[1,0].set_ylabel('tok/s')
+                      axes[1,0].axhline(y=tp_mean, color='red', linestyle='--', label=f'mean={tp_mean:.0f}')
+                      axes[1,0].legend(fontsize=8)
+
+                      axes[1,1].axis('off')
+                      summary = f"Completed: {completed}\nThroughput: {tp_mean:.0f} tok/s\nTTFT mean: {ttft_mean/1000:.1f}s\nITL mean: {itl_mean:.2f}ms\nAvg Replicas: {data['avg_replicas']:.2f}\nMax Replicas: {data['max_replicas']}"
+                      axes[1,1].text(0.1, 0.7, summary, transform=axes[1,1].transAxes, fontsize=13,
+                                     verticalalignment='top', fontfamily='monospace',
+                                     bbox=dict(boxstyle='round', facecolor='#f0f0f0', alpha=0.8))
+                      axes[1,1].set_title('Summary', fontweight='bold')
+
+                      fig.tight_layout()
+                      pdf.savefig(fig, bbox_inches='tight')
+                      plt.close()
+
+              print(f"  Generated PDF report: {pdf_path}")
+
+          print(f"Generated benchmark plots in {PANEL_DIR}")
+          for f in sorted(os.listdir(PANEL_DIR)):
+              if f.endswith('.png') or f.endswith('.pdf'):
+                  print(f"  {f}")
           PLOTEOF
 
       - name: Upload benchmark results
@@ -913,7 +1070,7 @@ jobs:
             <summary>Environment</summary>
 
             - Cluster: OpenShift (Real GPUs)
-            - Model: unsloth/Meta-Llama-3.1-8B
+            - Model: ${process.env.MODEL_ID || 'unsloth/Meta-Llama-3.1-8B'}
             - Accelerator: H100
             - Commit: ${sha.substring(0, 7)}
             - Scaler: prometheus-adapter

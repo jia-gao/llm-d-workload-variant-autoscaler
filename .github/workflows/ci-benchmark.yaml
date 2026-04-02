@@ -78,7 +78,22 @@ jobs:
               
               core.setOutput('run_benchmark', 'true');
               core.setOutput('platform', platform);
-              // Don't set PR-specific outputs for manual runs
+
+              // Try to find a PR for the current branch so we can post results
+              const branch = context.ref.replace('refs/heads/', '');
+              const { data: prs } = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                head: `${context.repo.owner}:${branch}`,
+                state: 'open',
+              });
+              if (prs.length > 0) {
+                core.setOutput('pr_number', prs[0].number.toString());
+                core.setOutput('pr_head_sha', prs[0].head.sha);
+                console.log(`Found open PR #${prs[0].number} for branch ${branch}`);
+              } else {
+                console.log(`No open PR found for branch ${branch}, skipping PR outputs`);
+              }
               return;
             }
 

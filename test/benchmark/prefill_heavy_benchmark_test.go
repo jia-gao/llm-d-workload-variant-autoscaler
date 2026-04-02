@@ -226,20 +226,19 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 		GinkgoWriter.Println("--- End Diagnostics ---")
 	}
 
-	// ensureEPPConfig patches the EPP with --config-text containing the
-	// EndpointPickerConfig (flowControl + scorer weights 2/2/3). It also
-	// removes the deprecated ENABLE_EXPERIMENTAL_FLOW_CONTROL_LAYER env
-	// var to avoid conflicts — the config-text featureGates supersede it.
+	// ensureEPPConfig updates the EPP's existing ConfigMap to enable
+	// flowControl and set scorer weights (queue=2, kv-cache=2, prefix-cache=3),
+	// then triggers a rollout restart and waits for Gateway health.
 	ensureEPPConfig := func() {
 		By("Discovering EPP deployment")
 		eppDeployName, findErr := fixtures.FindEPPDeployment(ctx, k8sClient, benchCfg.LLMDNamespace)
 		Expect(findErr).NotTo(HaveOccurred(), "Failed to find EPP deployment")
 		GinkgoWriter.Printf("  Found EPP deployment: %s\n", eppDeployName)
 
-		By("Patching EPP deployment with --config-text (scorer weights 2/2/3, flowControl)")
-		patchErr := fixtures.PatchEPPWithConfigText(ctx, k8sClient, benchCfg.LLMDNamespace, eppDeployName)
-		Expect(patchErr).NotTo(HaveOccurred(), "Failed to patch EPP deployment with config-text")
-		GinkgoWriter.Println("  EPP deployment patched and rolled out successfully")
+		By("Updating EPP ConfigMap with flowControl + scorer weights 2/2/3")
+		patchErr := fixtures.PatchEPPConfigMap(ctx, k8sClient, benchCfg.LLMDNamespace, eppDeployName)
+		Expect(patchErr).NotTo(HaveOccurred(), "Failed to update EPP ConfigMap")
+		GinkgoWriter.Println("  EPP ConfigMap updated and rollout completed")
 
 		By("Waiting for Gateway to become healthy after EPP rollout")
 		Eventually(func(g Gomega) {
@@ -247,7 +246,7 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 				benchCfg.GatewayServiceName, benchCfg.LLMDNamespace, benchCfg.GatewayServicePort)
 			err := fixtures.VerifyGatewayConnectivity(ctx, k8sClient, benchCfg.LLMDNamespace, gwURL, benchCfg.ModelID)
 			g.Expect(err).NotTo(HaveOccurred(), "Gateway not ready yet after EPP rollout")
-		}, 5*time.Minute, 15*time.Second).Should(Succeed(), "Gateway failed to become healthy after EPP config patch")
+		}, 5*time.Minute, 15*time.Second).Should(Succeed(), "Gateway failed to become healthy after EPP config update")
 		GinkgoWriter.Println("  Gateway is healthy after EPP config update")
 	}
 

@@ -6,14 +6,13 @@ import (
 	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
-// EndpointPickerConfigYAML is the full config text passed via --config-text.
-// It enables flowControl and sets scorer weights: queue=2, kv-cache=2, prefix-cache=3.
-const EndpointPickerConfigYAML = `apiVersion: inference.networking.x-k8s.io/v1alpha1
+// DesiredEPPConfig is the EndpointPickerConfig YAML with flowControl enabled
+// and scorer weights: queue=2, kv-cache=2, prefix-cache=3.
+const DesiredEPPConfig = `apiVersion: inference.networking.x-k8s.io/v1alpha1
 kind: EndpointPickerConfig
 featureGates:
 - flowControl
@@ -29,48 +28,69 @@ schedulingProfiles:
   - pluginRef: kv-cache-utilization-scorer
     weight: 2
   - pluginRef: prefix-cache-scorer
-    weight: 3`
+    weight: 3
+`
 
-// PatchEPPWithConfigText patches the EPP deployment to use --config-text with
-// the EndpointPickerConfig YAML inline. It also removes the deprecated
-// ENABLE_EXPERIMENTAL_FLOW_CONTROL_LAYER env var to avoid conflicts (the
-// config-text featureGates supersede it). This approach avoids ConfigMap
-// volume mounts which simplifies the patch. Waits for the rollout to complete.
-func PatchEPPWithConfigText(ctx context.Context, k8sClient *kubernetes.Clientset, namespace, eppDeploymentName string) error {
+// PatchEPPConfigMap updates the EPP's existing ConfigMap to include
+// featureGates: [flowControl] and the desired scorer weights, then triggers
+// a rollout restart. This avoids changing deployment args, volumes, or env
+// vars — only the ConfigMap data is modified.
+func PatchEPPConfigMap(ctx context.Context, k8sClient *kubernetes.Clientset, namespace, eppDeploymentName string) error {
 	dep, err := k8sClient.AppsV1().Deployments(namespace).Get(ctx, eppDeploymentName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to get EPP deployment %s: %w", eppDeploymentName, err)
 	}
 
-	c := &dep.Spec.Template.Spec.Containers[0]
+	// Find the ConfigMap name from the deployment's volumes
+	var configMapName string
+	for _, v := range dep.Spec.Template.Spec.Volumes {
+		if v.ConfigMap != nil {
+			configMapName = v.ConfigMap.Name
+			break
+		}
+	}
+	if configMapName == "" {
+		return fmt.Errorf("EPP deployment %s has no ConfigMap volume", eppDeploymentName)
+	}
 
-	// Check if already patched
-	for _, a := range c.Args {
-		if strings.HasPrefix(a, "--config-text=") {
-			return nil
+	// Find the config file key from --config-file arg
+	configKey := "default-plugins.yaml"
+	for _, a := range dep.Spec.Template.Spec.Containers[0].Args {
+		if strings.HasPrefix(a, "--config-file=") {
+			parts := strings.Split(a, "/")
+			if len(parts) > 0 {
+				configKey = parts[len(parts)-1]
+			}
 		}
 	}
 
-	// Remove the ENABLE_EXPERIMENTAL_FLOW_CONTROL_LAYER env var — the config
-	// text's featureGates: [flowControl] supersedes it and having both causes
-	// the EPP to malfunction on v0.5.0-rc.1.
-	filtered := make([]corev1.EnvVar, 0, len(c.Env))
-	for _, e := range c.Env {
-		if e.Name != "ENABLE_EXPERIMENTAL_FLOW_CONTROL_LAYER" {
-			filtered = append(filtered, e)
-		}
+	// Update the ConfigMap with flowControl + weights 2/2/3
+	cm, err := k8sClient.CoreV1().ConfigMaps(namespace).Get(ctx, configMapName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get EPP ConfigMap %s: %w", configMapName, err)
 	}
-	c.Env = filtered
 
-	// Append --config-text with inline YAML (preserves all existing args)
-	c.Args = append(c.Args, "--config-text="+EndpointPickerConfigYAML)
+	if strings.Contains(cm.Data[configKey], "flowControl") {
+		return nil
+	}
 
+	cm.Data[configKey] = DesiredEPPConfig
+	_, err = k8sClient.CoreV1().ConfigMaps(namespace).Update(ctx, cm, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update EPP ConfigMap %s: %w", configMapName, err)
+	}
+
+	// Trigger rollout restart via annotation change so the EPP picks up the new config
+	if dep.Spec.Template.Annotations == nil {
+		dep.Spec.Template.Annotations = make(map[string]string)
+	}
+	dep.Spec.Template.Annotations["benchmark/restart-trigger"] = time.Now().Format(time.RFC3339)
 	_, err = k8sClient.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to update EPP deployment with config-text: %w", err)
+		return fmt.Errorf("failed to trigger EPP rollout restart: %w", err)
 	}
 
-	// Wait for rollout: new pods ready
+	// Wait for rollout to complete
 	deadline := time.After(5 * time.Minute)
 	tick := time.NewTicker(10 * time.Second)
 	defer tick.Stop()
@@ -84,7 +104,7 @@ func PatchEPPWithConfigText(ctx context.Context, k8sClient *kubernetes.Clientset
 				continue
 			}
 			if d.Status.UpdatedReplicas > 0 && d.Status.ReadyReplicas == d.Status.UpdatedReplicas &&
-				d.Status.UnavailableReplicas == 0 {
+				d.Status.UnavailableReplicas == 0 && d.Status.ObservedGeneration >= d.Generation {
 				return nil
 			}
 		}
@@ -115,4 +135,3 @@ func containsAny(s string, substrs ...string) bool {
 	}
 	return false
 }
-

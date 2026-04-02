@@ -12,7 +12,10 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/prometheus/common/model"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -195,18 +198,17 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 			}
 		}
 
-		GinkgoWriter.Println("--- All Services (port 8000 or gateway) ---")
+		GinkgoWriter.Println("--- All Services (all ports) ---")
 		svcs, svcErr := k8sClient.CoreV1().Services(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{})
 		if svcErr == nil {
 			for i := range svcs.Items {
 				s := &svcs.Items[i]
+				var ports []string
 				for _, port := range s.Spec.Ports {
-					if port.Port == 8000 || port.Port == 80 || strings.Contains(s.Name, "gateway") || strings.Contains(s.Name, "epp") {
-						GinkgoWriter.Printf("  svc/%s  type=%s  ports=%d→%s  selector=%v\n",
-							s.Name, s.Spec.Type, port.Port, port.TargetPort.String(), s.Spec.Selector)
-						break
-					}
+					ports = append(ports, fmt.Sprintf("%s:%d→%s", port.Name, port.Port, port.TargetPort.String()))
 				}
+				GinkgoWriter.Printf("  svc/%s  type=%s  ports=[%s]  selector=%v\n",
+					s.Name, s.Spec.Type, strings.Join(ports, ", "), s.Spec.Selector)
 			}
 		}
 
@@ -223,6 +225,83 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 					d.Name, spec, d.Status.ReadyReplicas, d.Spec.Selector.MatchLabels)
 			}
 		}
+
+		GinkgoWriter.Println("--- EPP Pod Logs (last 50 lines) ---")
+		if pods, pErr := k8sClient.CoreV1().Pods(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{}); pErr == nil {
+			for i := range pods.Items {
+				p := &pods.Items[i]
+				if strings.Contains(p.Name, "epp") || strings.Contains(p.Name, "inference-scheduler") {
+					tailLines := int64(50)
+					logOpts := &corev1.PodLogOptions{TailLines: &tailLines}
+					logReq := k8sClient.CoreV1().Pods(benchCfg.LLMDNamespace).GetLogs(p.Name, logOpts)
+					logBytes, logErr := logReq.DoRaw(ctx)
+					if logErr != nil {
+						GinkgoWriter.Printf("  [%s] failed to get logs: %v\n", p.Name, logErr)
+					} else {
+						GinkgoWriter.Printf("  [%s] logs:\n%s\n", p.Name, string(logBytes))
+					}
+				}
+			}
+		}
+
+		GinkgoWriter.Println("--- Gateway Pod Logs (last 30 lines) ---")
+		if pods, pErr := k8sClient.CoreV1().Pods(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{}); pErr == nil {
+			for i := range pods.Items {
+				p := &pods.Items[i]
+				if strings.Contains(p.Name, "gateway") {
+					tailLines := int64(30)
+					logOpts := &corev1.PodLogOptions{TailLines: &tailLines}
+					logReq := k8sClient.CoreV1().Pods(benchCfg.LLMDNamespace).GetLogs(p.Name, logOpts)
+					logBytes, logErr := logReq.DoRaw(ctx)
+					if logErr != nil {
+						GinkgoWriter.Printf("  [%s] failed to get logs: %v\n", p.Name, logErr)
+					} else {
+						GinkgoWriter.Printf("  [%s] logs:\n%s\n", p.Name, string(logBytes))
+					}
+				}
+			}
+		}
+
+		GinkgoWriter.Println("--- InferencePool / InferenceModel (via unstructured) ---")
+		if crClient != nil {
+			poolList := &unstructured.UnstructuredList{}
+			poolList.SetGroupVersionKind(schema.GroupVersionKind{
+				Group: "inference.networking.x-k8s.io", Version: "v1alpha2", Kind: "InferencePoolList",
+			})
+			if err := crClient.List(ctx, poolList, client.InNamespace(benchCfg.LLMDNamespace)); err == nil {
+				for _, item := range poolList.Items {
+					data, _ := json.MarshalIndent(item.Object, "  ", "  ")
+					GinkgoWriter.Printf("  InferencePool/%s:\n  %s\n", item.GetName(), string(data))
+				}
+			} else {
+				GinkgoWriter.Printf("  Failed to list InferencePool (v1alpha2): %v\n", err)
+				poolList.SetGroupVersionKind(schema.GroupVersionKind{
+					Group: "inference.networking.k8s.io", Version: "v1", Kind: "InferencePoolList",
+				})
+				if err2 := crClient.List(ctx, poolList, client.InNamespace(benchCfg.LLMDNamespace)); err2 == nil {
+					for _, item := range poolList.Items {
+						data, _ := json.MarshalIndent(item.Object, "  ", "  ")
+						GinkgoWriter.Printf("  InferencePool/%s:\n  %s\n", item.GetName(), string(data))
+					}
+				} else {
+					GinkgoWriter.Printf("  Failed to list InferencePool (v1): %v\n", err2)
+				}
+			}
+
+			modelList := &unstructured.UnstructuredList{}
+			modelList.SetGroupVersionKind(schema.GroupVersionKind{
+				Group: "inference.networking.x-k8s.io", Version: "v1alpha2", Kind: "InferenceModelList",
+			})
+			if err := crClient.List(ctx, modelList, client.InNamespace(benchCfg.LLMDNamespace)); err == nil {
+				for _, item := range modelList.Items {
+					data, _ := json.MarshalIndent(item.Object, "  ", "  ")
+					GinkgoWriter.Printf("  InferenceModel/%s:\n  %s\n", item.GetName(), string(data))
+				}
+			} else {
+				GinkgoWriter.Printf("  Failed to list InferenceModel (v1alpha2): %v\n", err)
+			}
+		}
+
 		GinkgoWriter.Println("--- End Diagnostics ---")
 	}
 

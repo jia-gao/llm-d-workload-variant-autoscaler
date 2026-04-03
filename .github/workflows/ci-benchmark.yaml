@@ -761,40 +761,73 @@ jobs:
                   fig, ax = plt.subplots(figsize=(11, 8.5))
                   ax.axis('off')
                   lines = []
-                  lines.append(f"{'='*80}")
-                  lines.append(f"AUTOSCALER TYPE : {'Workload Variant Autoscaler (WVA)' if atype == 'WVA' else 'Direct HPA (Legacy) Baseline'}")
-                  lines.append(f"MODEL : {model_id}")
-                  lines.append(f"{'='*80}")
+                  sep = '='*80
+                  dash = '-'*80
+
+                  va_cfg = data.get('va_config', 'N/A')
+                  hpa_cfg = data.get('hpa_config', 'N/A')
+                  data_model = data.get('model_id', model_id)
+
+                  if atype == 'WVA':
+                      atype_label = 'Workload Variant Autoscaler (WVA)'
+                  else:
+                      atype_label = 'HPA Baseline (VA-constrained + HPA)'
+
+                  lines.append(sep)
+                  lines.append(f"AUTOSCALER TYPE : {atype_label}")
+                  lines.append(f"MODEL           : {data_model}")
+                  lines.append(sep)
+                  lines.append(f"Autoscaler Configuration")
+                  lines.append(dash)
+                  lines.append(f"  Variant (VA)  : {va_cfg}")
+                  lines.append(f"  HPA           : {hpa_cfg}")
+                  lines.append(sep)
                   lines.append(f"Benchmark Load Generator Configuration")
-                  lines.append(f"{'='*80}")
-                  lines.append(f"Profile: poisson @ 20 req/s")
-                  lines.append(f"Prompt tokens: 4000 | Output tokens: 1000")
-                  lines.append(f"Max seconds: 600 | Seed: 42")
-                  lines.append(f"{'='*80}")
-                  lines.append(f"EPP Configuration: flowControl, queue-scorer=2, kv-cache=2, prefix-cache=3")
-                  lines.append(f"{'='*80}")
+                  lines.append(dash)
+                  lines.append(f"  Profile       : poisson @ 20 req/s")
+                  lines.append(f"  Prompt tokens : 4000 | Output tokens: 1000")
+                  lines.append(f"  Max seconds   : 600  | Seed: 42")
+                  lines.append(sep)
+                  lines.append(f"EPP Configuration")
+                  lines.append(dash)
+                  lines.append(f"  Flow Control  : ENABLED")
+                  lines.append(f"  Scorers       : queue-scorer=2, kv-cache-utilization-scorer=2, prefix-cache-scorer=3")
+                  lines.append(sep)
                   lines.append(f"Results Summary")
-                  lines.append(f"{'='*80}")
+                  lines.append(dash)
+
                   tp_obj = data.get('throughput', {})
                   ttft_obj = data.get('ttft', {})
                   itl_obj = data.get('itl', {})
                   tp_mean = tp_obj.get('mean', 0) if isinstance(tp_obj, dict) else 0
                   ttft_mean = ttft_obj.get('mean', 0) if isinstance(ttft_obj, dict) else 0
+                  ttft_p50 = ttft_obj.get('percentiles', {}).get('p50', 0) if isinstance(ttft_obj, dict) else 0
                   ttft_p99 = ttft_obj.get('percentiles', {}).get('p99', 0) if isinstance(ttft_obj, dict) else 0
                   itl_mean = itl_obj.get('mean', 0) if isinstance(itl_obj, dict) else 0
+                  itl_p50 = itl_obj.get('percentiles', {}).get('p50', 0) if isinstance(itl_obj, dict) else 0
                   itl_p99 = itl_obj.get('percentiles', {}).get('p99', 0) if isinstance(itl_obj, dict) else 0
                   completed = ttft_obj.get('count', 0) if isinstance(ttft_obj, dict) else 0
-                  lines.append(f"Throughput (mean):    {tp_mean:.1f} tok/s")
-                  lines.append(f"Completed Requests:   {completed}")
-                  lines.append(f"Max Replicas:         {data['max_replicas']}")
-                  lines.append(f"Avg Replicas:         {data['avg_replicas']:.2f}")
-                  lines.append(f"Avg vLLM Queue:       {data['avg_queue_depth']:.1f}")
-                  lines.append(f"Avg EPP Queue:        {data.get('avg_epp_queue_depth', 0):.1f}")
-                  lines.append(f"Avg KV Cache:         {data['avg_kv_cache']:.4f}")
-                  lines.append(f"TTFT mean:            {ttft_mean/1000:.1f}s | P99: {ttft_p99/1000:.1f}s")
-                  lines.append(f"ITL mean:             {itl_mean:.2f}ms | P99: {itl_p99:.2f}ms")
-                  lines.append(f"Duration:             {data['duration_sec']:.0f}s")
-                  ax.text(0.05, 0.95, '\n'.join(lines), transform=ax.transAxes, fontsize=9,
+                  error_count = data.get('error_count', 0)
+                  incomplete_count = data.get('incomplete_count', 0)
+                  achieved_rps = data.get('achieved_rps', 0)
+
+                  lines.append(f"  Completed Requests  : {completed}")
+                  lines.append(f"  Failed Requests     : {error_count}")
+                  lines.append(f"  Incomplete Requests : {incomplete_count}")
+                  lines.append(f"  Achieved RPS        : {achieved_rps:.2f}")
+                  lines.append(f"  Throughput (mean)   : {tp_mean:.1f} tok/s")
+                  lines.append(f"  Max Replicas        : {data['max_replicas']}")
+                  lines.append(f"  Avg Replicas        : {data['avg_replicas']:.2f}")
+                  lines.append(f"  Avg vLLM Queue      : {data['avg_queue_depth']:.1f}")
+                  lines.append(f"  Avg EPP Queue       : {data.get('avg_epp_queue_depth', 0):.1f}")
+                  lines.append(f"  Avg KV Cache        : {data['avg_kv_cache']*100:.2f}%")
+                  lines.append(dash)
+                  lines.append(f"  TTFT  mean={ttft_mean/1000:.2f}s  p50={ttft_p50/1000:.2f}s  p99={ttft_p99/1000:.2f}s")
+                  lines.append(f"  ITL   mean={itl_mean:.2f}ms  p50={itl_p50:.2f}ms  p99={itl_p99:.2f}ms")
+                  lines.append(f"  Duration: {data['duration_sec']:.0f}s")
+                  lines.append(sep)
+
+                  ax.text(0.05, 0.95, '\n'.join(lines), transform=ax.transAxes, fontsize=8.5,
                           verticalalignment='top', fontfamily='monospace',
                           bbox=dict(boxstyle='round', facecolor='#f0f0f0', alpha=0.8))
                   fig.suptitle(f'{atype} Benchmark Report — {model_short}', fontsize=14, fontweight='bold')
@@ -880,9 +913,22 @@ jobs:
                       axes[1,0].legend(fontsize=8)
 
                       axes[1,1].axis('off')
-                      summary = f"Completed: {completed}\nThroughput: {tp_mean:.0f} tok/s\nTTFT mean: {ttft_mean/1000:.1f}s\nITL mean: {itl_mean:.2f}ms\nAvg Replicas: {data['avg_replicas']:.2f}\nMax Replicas: {data['max_replicas']}"
-                      axes[1,1].text(0.1, 0.7, summary, transform=axes[1,1].transAxes, fontsize=13,
-                                     verticalalignment='top', fontfamily='monospace',
+                      summary_lines = [
+                          f"Completed : {completed}",
+                          f"Failed    : {error_count}",
+                          f"Incomplete: {incomplete_count}",
+                          f"RPS       : {achieved_rps:.2f}",
+                          f"",
+                          f"Throughput: {tp_mean:.0f} tok/s",
+                          f"TTFT mean : {ttft_mean/1000:.2f}s",
+                          f"ITL mean  : {itl_mean:.2f}ms",
+                          f"",
+                          f"Avg Replicas: {data['avg_replicas']:.2f}",
+                          f"Max Replicas: {data['max_replicas']}",
+                          f"Avg KV Cache: {data['avg_kv_cache']*100:.2f}%",
+                      ]
+                      axes[1,1].text(0.1, 0.85, '\n'.join(summary_lines), transform=axes[1,1].transAxes,
+                                     fontsize=11, verticalalignment='top', fontfamily='monospace',
                                      bbox=dict(boxstyle='round', facecolor='#f0f0f0', alpha=0.8))
                       axes[1,1].set_title('Summary', fontweight='bold')
 
@@ -986,6 +1032,9 @@ jobs:
             | **Throughput mean** | ${fmtM(hpa.throughput)}tok/s | **${fmtM(wva.throughput)}tok/s** | ${hpa.throughput && wva.throughput ? delta(hpa.throughput.mean, wva.throughput.mean) : '—'} |
             | **Throughput p50** | ${fmtP(hpa.throughput, 'p50')}tok/s | **${fmtP(wva.throughput, 'p50')}tok/s** | — |
             | **Completed Requests** | ${hpa.ttft ? hpa.ttft.count : 'N/A'} | **${wva.ttft ? wva.ttft.count : 'N/A'}** | ${hpa.ttft && wva.ttft ? delta(hpa.ttft.count, wva.ttft.count) : '—'} |
+            | **Failed Requests** | ${hpa.error_count || 0} | ${wva.error_count || 0} | — |
+            | **Incomplete Requests** | ${hpa.incomplete_count || 0} | ${wva.incomplete_count || 0} | — |
+            | **Achieved RPS** | ${(hpa.achieved_rps || 0).toFixed(2)} | ${(wva.achieved_rps || 0).toFixed(2)} | — |
             | **Duration** | ${hpa.duration_sec.toFixed(0)}s | ${wva.duration_sec.toFixed(0)}s | — |`;
 
                   let timelines = '';

@@ -26,6 +26,9 @@ import (
 // PrefillResult holds results for one prefill benchmark run (HPA or WVA).
 type PrefillResult struct {
 	AutoscalerType   string          `json:"autoscaler_type"`
+	ModelID          string          `json:"model_id"`
+	VAConfig         string          `json:"va_config"`
+	HPAConfig        string          `json:"hpa_config"`
 	ReplicaTimeline  []ReplicaSnap   `json:"replica_timeline"`
 	MetricsTimeline  []MetricSnap    `json:"metrics_timeline"`
 	AvgReplicas      float64         `json:"avg_replicas"`
@@ -33,6 +36,9 @@ type PrefillResult struct {
 	AvgQueueDepth    float64         `json:"avg_queue_depth"`
 	AvgEPPQueueDepth float64         `json:"avg_epp_queue_depth"`
 	AvgKVCache       float64         `json:"avg_kv_cache"`
+	AchievedRPS      float64         `json:"achieved_rps"`
+	ErrorCount       int             `json:"error_count"`
+	IncompleteCount  int             `json:"incomplete_count"`
 	TTFT             json.RawMessage `json:"ttft,omitempty"`
 	ITL              json.RawMessage `json:"itl,omitempty"`
 	Throughput       json.RawMessage `json:"throughput,omitempty"`
@@ -572,8 +578,49 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 			GinkgoWriter.Printf("Warning: failed to query EPP queue depth avg: %v\n", err)
 		}
 
+		// Build config description strings for the PDF report
+		var vaConfig, hpaConfig string
+		if autoscalerType == "HPA" {
+			vaConfig = "Min=1, Max=2, Cost=10.0"
+			hpaConfig = "Min=1, Max=10, ScaleUp: 0s/Percent100, ScaleDown: 240s/Percent100"
+		} else {
+			vaConfig = "Min=1, Max=10, Cost=10.0"
+			hpaConfig = "Min=1, Max=10, ScaleUp: 0s/Pods10, ScaleDown: 240s/Pods10"
+		}
+
+		// Extract error counts and achieved RPS from GuideLLM output
+		var errorCount, incompleteCount int
+		var achievedRPS float64
+		if guidellmRaw != nil {
+			var parsed map[string]interface{}
+			if jsonErr := json.Unmarshal(guidellmRaw, &parsed); jsonErr == nil {
+				if benchmarks, ok := parsed["benchmarks"].([]interface{}); ok && len(benchmarks) > 0 {
+					if bm, ok := benchmarks[0].(map[string]interface{}); ok {
+						if metrics, ok := bm["metrics"].(map[string]interface{}); ok {
+							if rt, ok := metrics["request_totals"].(map[string]interface{}); ok {
+								if f, ok := rt["errored"].(float64); ok {
+									errorCount = int(f)
+								}
+								if f, ok := rt["incomplete"].(float64); ok {
+									incompleteCount = int(f)
+								}
+							}
+						}
+						if rateObj, ok := bm["rate"].(map[string]interface{}); ok {
+							if f, ok := rateObj["completed_rate"].(float64); ok {
+								achievedRPS = f
+							}
+						}
+					}
+				}
+			}
+		}
+
 		result := PrefillResult{
 			AutoscalerType:   autoscalerType,
+			ModelID:          benchCfg.ModelID,
+			VAConfig:         vaConfig,
+			HPAConfig:        hpaConfig,
 			ReplicaTimeline:  timeline,
 			MetricsTimeline:  metricsTimeline,
 			AvgReplicas:      replicaAvg,
@@ -581,6 +628,9 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 			AvgQueueDepth:    qdAvg,
 			AvgEPPQueueDepth: eppQDAvg,
 			AvgKVCache:       kvAvg,
+			AchievedRPS:      achievedRPS,
+			ErrorCount:       errorCount,
+			IncompleteCount:  incompleteCount,
 			TTFT:            ttftJSON,
 			ITL:             itlJSON,
 			Throughput:      throughputJSON,
@@ -619,21 +669,36 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 	}
 
 	Context("HPA Baseline", func() {
-		It("should run the prefill heavy workload against standard HPA", func() {
+		It("should run the prefill heavy workload against HPA + VA(max=2)", func() {
 			cleanupAutoscalers()
 			res.DeploymentName = findInfraDecodeDeployment()
+			ensureInfraDeploymentReady()
 
-			By("Creating standard HPA (CPU-based, Scale Up: 0s, Scale Down: 240s)")
-			scaleUpPolicies := []autoscalingv2.HPAScalingPolicy{{Type: autoscalingv2.PercentScalingPolicy, Value: 100, PeriodSeconds: 15}}
-			scaleDownPolicies := []autoscalingv2.HPAScalingPolicy{{Type: autoscalingv2.PercentScalingPolicy, Value: 100, PeriodSeconds: 15}}
-
-			err := fixtures.EnsureStandardHPA(
-				ctx, k8sClient, benchCfg.LLMDNamespace, res.HPAName, res.DeploymentName,
-				1, 10,
-				0, 240,
-				scaleUpPolicies, scaleDownPolicies,
+			By("Creating VariantAutoscaling with max=2 (limited VA for HPA baseline)")
+			err := fixtures.EnsureVariantAutoscaling(
+				ctx, crClient, benchCfg.LLMDNamespace, res.VAName, res.DeploymentName,
+				benchCfg.ModelID, benchCfg.AcceleratorType, 10.0, benchCfg.ControllerInstance,
+				fixtures.WithMinReplicas(1),
+				fixtures.WithMaxReplicas(2),
 			)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create standard HPA")
+			Expect(err).NotTo(HaveOccurred(), "Failed to create VA for HPA baseline")
+
+			By("Creating HPA (Scale Up: 0s/Percent, Scale Down: 240s/Percent)")
+			behavior := &autoscalingv2.HorizontalPodAutoscalerBehavior{
+				ScaleUp: &autoscalingv2.HPAScalingRules{
+					StabilizationWindowSeconds: ptr.To(int32(0)),
+					Policies:                   []autoscalingv2.HPAScalingPolicy{{Type: autoscalingv2.PercentScalingPolicy, Value: 100, PeriodSeconds: 15}},
+				},
+				ScaleDown: &autoscalingv2.HPAScalingRules{
+					StabilizationWindowSeconds: ptr.To(int32(240)),
+					Policies:                   []autoscalingv2.HPAScalingPolicy{{Type: autoscalingv2.PercentScalingPolicy, Value: 100, PeriodSeconds: 15}},
+				},
+			}
+
+			err = fixtures.EnsureHPA(ctx, k8sClient, benchCfg.LLMDNamespace, res.HPAName, res.DeploymentName, res.VAName, 1, 10, behavior)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create HPA")
+
+			waitForVAAndMetrics()
 
 			runPrefillBenchmark("HPA")
 		})
@@ -666,10 +731,10 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 			By("Waiting for stale Prometheus metrics to settle (60s)")
 			time.Sleep(60 * time.Second)
 
-			By("Creating VariantAutoscaling resource (Scale Up: 0s, Scale Down: 240s)")
+			By("Creating VariantAutoscaling resource (max=10, cost=10)")
 			err = fixtures.EnsureVariantAutoscaling(
 				ctx, crClient, benchCfg.LLMDNamespace, res.VAName, res.DeploymentName,
-				benchCfg.ModelID, benchCfg.AcceleratorType, 30.0, benchCfg.ControllerInstance,
+				benchCfg.ModelID, benchCfg.AcceleratorType, 10.0, benchCfg.ControllerInstance,
 				fixtures.WithMinReplicas(1),
 				fixtures.WithMaxReplicas(10),
 			)

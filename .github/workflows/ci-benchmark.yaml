@@ -579,7 +579,7 @@ jobs:
         env:
           ENVIRONMENT: openshift
           USE_SIMULATOR: "false"
-          SCALER_BACKEND: none
+          SCALER_BACKEND: prometheus-adapter
           CONTROLLER_NAMESPACE: ${{ env.WVA_NAMESPACE }}
           E2E_MONITORING_NAMESPACE: openshift-user-workload-monitoring
           E2E_EMULATED_LLMD_NAMESPACE: ${{ env.LLMD_NAMESPACE }}
@@ -595,11 +595,45 @@ jobs:
           # Get token for Thanos querier
           export PROMETHEUS_TOKEN=$(kubectl create token prometheus-k8s -n openshift-monitoring --duration=24h 2>/dev/null || echo "")
 
-          # Verify external metrics API is available (pre-installed on this cluster)
+          # Start APIService guard: KEDA on this cluster continuously reclaims the
+          # external.metrics.k8s.io APIService. This background loop re-patches it
+          # every 8 seconds so the HPA can read wva_desired_replicas during the benchmark.
+          # Key fix: caBundle must be set to null because KEDA sets it, and Kubernetes
+          # rejects insecureSkipTLSVerify=true when caBundle is present.
+          MONITORING_NS="openshift-user-workload-monitoring"
+          (
+            while true; do
+              sleep 8
+              current_svc=$(kubectl get apiservice v1beta1.external.metrics.k8s.io -o jsonpath='{.spec.service.name}' 2>/dev/null)
+              current_ns=$(kubectl get apiservice v1beta1.external.metrics.k8s.io -o jsonpath='{.spec.service.namespace}' 2>/dev/null)
+              if [ "$current_svc" != "prometheus-adapter" ] || [ "$current_ns" != "$MONITORING_NS" ]; then
+                echo "[apiservice-guard] KEDA reclaimed (now: $current_svc/$current_ns), re-patching..."
+                kubectl patch apiservice v1beta1.external.metrics.k8s.io --type=merge -p "{
+                  \"spec\": {
+                    \"caBundle\": null,
+                    \"insecureSkipTLSVerify\": true,
+                    \"service\": {
+                      \"name\": \"prometheus-adapter\",
+                      \"namespace\": \"$MONITORING_NS\"
+                    }
+                  }
+                }" 2>&1 || true
+              fi
+            done
+          ) &
+          GUARD_PID=$!
+          echo "APIService guard started (PID=$GUARD_PID)"
+
+          # Give guard time to do initial patch if needed
+          sleep 12
           echo "Checking external metrics API..."
           kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1" | head -1 && echo "External metrics API: OK" || echo "WARNING: External metrics API not available"
 
-          make test-benchmark
+          TEST_EXIT=0
+          make test-benchmark || TEST_EXIT=$?
+
+          kill $GUARD_PID 2>/dev/null || true
+          exit $TEST_EXIT
 
       - name: Generate benchmark plots
         if: always()

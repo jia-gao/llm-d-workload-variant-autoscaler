@@ -182,6 +182,7 @@ start_apiservice_guard() {
                 echo "[apiservice-guard] KEDA reclaimed APIService (now: $current_svc/$current_ns), re-patching to prometheus-adapter/$monitoring_ns"
                 kubectl patch apiservice v1beta1.external.metrics.k8s.io --type=merge -p "{
                     \"spec\": {
+                        \"caBundle\": null,
                         \"insecureSkipTLSVerify\": true,
                         \"service\": {
                             \"name\": \"prometheus-adapter\",
@@ -1347,6 +1348,7 @@ deploy_prometheus_adapter() {
             log_info "Patching APIService to point to Prometheus Adapter in $MONITORING_NAMESPACE"
             kubectl patch apiservice v1beta1.external.metrics.k8s.io --type=merge -p "{
                 \"spec\": {
+                    \"caBundle\": null,
                     \"insecureSkipTLSVerify\": true,
                     \"service\": {
                         \"name\": \"prometheus-adapter\",

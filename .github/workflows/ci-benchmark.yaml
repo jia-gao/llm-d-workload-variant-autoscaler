@@ -1074,7 +1074,7 @@ jobs:
             | **Avg vLLM Queue Depth** | ${hpa.avg_queue_depth.toFixed(1)} | **${wva.avg_queue_depth.toFixed(1)}** | ${delta(hpa.avg_queue_depth, wva.avg_queue_depth)} |
             | **Avg EPP Queue Depth** | ${(hpa.avg_epp_queue_depth||0).toFixed(1)} | **${(wva.avg_epp_queue_depth||0).toFixed(1)}** | ${delta(hpa.avg_epp_queue_depth||0, wva.avg_epp_queue_depth||0)} |
             | **Avg KV Cache** | ${hpa.avg_kv_cache.toFixed(3)} | ${wva.avg_kv_cache.toFixed(3)} | ${delta(hpa.avg_kv_cache, wva.avg_kv_cache)} |
-            | **TTFT mean** | ${fmtM(hpa.ttft, 1000)}ms | **${fmtM(wva.ttft, 1000)}ms** | ${hpa.ttft && wva.ttft ? delta(hpa.ttft.mean, wva.ttft.mean) : '—'} |
+            | **TTFT mean** | ${fmtM(hpa.ttft, 1000)}s | **${fmtM(wva.ttft, 1000)}s** | ${hpa.ttft && wva.ttft ? delta(hpa.ttft.mean, wva.ttft.mean) : '—'} |
             | **TTFT p50** | ${fmtP(hpa.ttft, 'p50', 1000)}s | **${fmtP(wva.ttft, 'p50', 1000)}s** | — |
             | **TTFT p99** | ${fmtP(hpa.ttft, 'p99', 1000)}s | **${fmtP(wva.ttft, 'p99', 1000)}s** | — |
             | **ITL mean** | ${fmtM(hpa.itl, 1, 2)}ms | **${fmtM(wva.itl, 1, 2)}ms** | ${hpa.itl && wva.itl ? delta(hpa.itl.mean, wva.itl.mean) : '—'} |

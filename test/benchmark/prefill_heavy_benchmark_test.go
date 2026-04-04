@@ -651,7 +651,7 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 		}
 
 		// Extract error counts and achieved RPS from GuideLLM output
-		var errorCount, incompleteCount int
+		var errorCount, incompleteCount, completedCount int
 		var achievedRPS float64
 		if guidellmRaw != nil {
 			var parsed map[string]interface{}
@@ -666,6 +666,9 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 								if f, ok := rt["incomplete"].(float64); ok {
 									incompleteCount = int(f)
 								}
+								if f, ok := rt["successful"].(float64); ok {
+									completedCount = int(f)
+								}
 							}
 						}
 						if rateObj, ok := bm["rate"].(map[string]interface{}); ok {
@@ -676,6 +679,9 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Label("benchmark", "phase4"
 					}
 				}
 			}
+		}
+		if achievedRPS == 0 && completedCount > 0 && loadDuration > 0 {
+			achievedRPS = float64(completedCount) / loadDuration
 		}
 
 		result := PrefillResult{

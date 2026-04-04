@@ -654,6 +654,16 @@ jobs:
               'axes.titlesize': 14, 'axes.labelsize': 12, 'figure.dpi': 150,
           })
           HPA_C, WVA_C = '#e74c3c', '#2ecc71'
+          EMPTY_METRIC = {'mean': 0, 'count': 0, 'percentiles': {k: 0 for k in ['p05','p10','p25','p50','p75','p90','p95','p99']}}
+
+          def m(data, key):
+              """Safely get a metric dict, returning EMPTY_METRIC if absent."""
+              v = data.get(key)
+              if isinstance(v, dict):
+                  if 'percentiles' not in v:
+                      v['percentiles'] = EMPTY_METRIC['percentiles']
+                  return v
+              return EMPTY_METRIC
 
           def bar_pair(ax, hv, wv, title, ylabel, fmt='.1f'):
               bars = ax.bar(['HPA', 'WVA'], [hv, wv], color=[HPA_C, WVA_C], width=0.5, edgecolor='white', linewidth=1.5)
@@ -666,14 +676,14 @@ jobs:
           # 1. Comparison bars (3x3 grid)
           fig, axes = plt.subplots(3, 3, figsize=(20, 13))
           fig.suptitle('HPA vs WVA — Prefill-Heavy Workload (OpenShift)', fontsize=16, fontweight='bold', y=1.02)
-          bar_pair(axes[0,0], hpa['throughput']['mean'], wva['throughput']['mean'], 'Mean Throughput', 'tokens/sec', '.0f')
-          bar_pair(axes[0,1], hpa['ttft']['count'], wva['ttft']['count'], 'Completed Requests', 'count', 'd')
+          bar_pair(axes[0,0], m(hpa,'throughput')['mean'], m(wva,'throughput')['mean'], 'Mean Throughput', 'tokens/sec', '.0f')
+          bar_pair(axes[0,1], m(hpa,'ttft')['count'], m(wva,'ttft')['count'], 'Completed Requests', 'count', 'd')
           bar_pair(axes[0,2], hpa['max_replicas'], wva['max_replicas'], 'Max Replicas', 'replicas', 'd')
           bar_pair(axes[1,0], hpa['avg_kv_cache'], wva['avg_kv_cache'], 'Avg KV Cache', 'utilization', '.3f')
           bar_pair(axes[1,1], hpa['avg_queue_depth'], wva['avg_queue_depth'], 'Avg vLLM Queue', 'requests', '.0f')
           bar_pair(axes[1,2], hpa.get('avg_epp_queue_depth',0), wva.get('avg_epp_queue_depth',0), 'Avg EPP Queue', 'requests', '.0f')
-          bar_pair(axes[2,0], hpa['itl']['mean'], wva['itl']['mean'], 'Mean ITL', 'ms', '.2f')
-          bar_pair(axes[2,1], hpa['ttft']['mean']/1000, wva['ttft']['mean']/1000, 'Mean TTFT', 'seconds', '.1f')
+          bar_pair(axes[2,0], m(hpa,'itl')['mean'], m(wva,'itl')['mean'], 'Mean ITL', 'ms', '.2f')
+          bar_pair(axes[2,1], m(hpa,'ttft')['mean']/1000, m(wva,'ttft')['mean']/1000, 'Mean TTFT', 'seconds', '.1f')
           bar_pair(axes[2,2], hpa['avg_replicas'], wva['avg_replicas'], 'Avg Replicas', 'replicas', '.1f')
           fig.tight_layout()
           fig.savefig(os.path.join(PANEL_DIR, 'panel-prefill-comparison.png'), bbox_inches='tight', dpi=150)
@@ -735,8 +745,8 @@ jobs:
           fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))
           fig.suptitle('Percentile Distributions — HPA vs WVA', fontsize=15, fontweight='bold')
           for ax, metric, unit, div in [(ax1,'ttft','seconds',1000),(ax2,'itl','ms',1),(ax3,'throughput','tok/s',1)]:
-              hv = [hpa[metric]['percentiles'][k]/div for k in pct_keys]
-              wv = [wva[metric]['percentiles'][k]/div for k in pct_keys]
+              hv = [m(hpa, metric)['percentiles'].get(k, 0)/div for k in pct_keys]
+              wv = [m(wva, metric)['percentiles'].get(k, 0)/div for k in pct_keys]
               ax.bar(x - w/2, hv, w, label='HPA', color=HPA_C, alpha=0.85)
               ax.bar(x + w/2, wv, w, label='WVA', color=WVA_C, alpha=0.85)
               ax.set_xticks(x); ax.set_xticklabels(pct_labels, fontsize=9)
@@ -893,7 +903,7 @@ jobs:
                       pct_labels = ['p5','p10','p25','p50','p75','p90','p95','p99']
                       x = np.arange(len(pct_labels))
 
-                      ttft_vals = [ttft_obj['percentiles'][k]/1000 for k in pct_keys]
+                      ttft_vals = [ttft_obj.get('percentiles', {}).get(k, 0)/1000 for k in pct_keys]
                       axes[0,0].bar(x, ttft_vals, color=color, alpha=0.85)
                       axes[0,0].set_xticks(x); axes[0,0].set_xticklabels(pct_labels, fontsize=8)
                       axes[0,0].set_title('TTFT Percentiles', fontweight='bold')
@@ -901,7 +911,7 @@ jobs:
                       axes[0,0].axhline(y=ttft_mean/1000, color='red', linestyle='--', label=f'mean={ttft_mean/1000:.1f}s')
                       axes[0,0].legend(fontsize=8)
 
-                      itl_vals = [itl_obj['percentiles'][k] for k in pct_keys]
+                      itl_vals = [itl_obj.get('percentiles', {}).get(k, 0) for k in pct_keys]
                       axes[0,1].bar(x, itl_vals, color=color, alpha=0.85)
                       axes[0,1].set_xticks(x); axes[0,1].set_xticklabels(pct_labels, fontsize=8)
                       axes[0,1].set_title('ITL Percentiles', fontweight='bold')
@@ -909,7 +919,7 @@ jobs:
                       axes[0,1].axhline(y=itl_mean, color='red', linestyle='--', label=f'mean={itl_mean:.2f}ms')
                       axes[0,1].legend(fontsize=8)
 
-                      tp_vals = [tp_obj['percentiles'][k] for k in pct_keys]
+                      tp_vals = [tp_obj.get('percentiles', {}).get(k, 0) for k in pct_keys]
                       axes[1,0].bar(x, tp_vals, color=color, alpha=0.85)
                       axes[1,0].set_xticks(x); axes[1,0].set_xticklabels(pct_labels, fontsize=8)
                       axes[1,0].set_title('Throughput Percentiles', fontweight='bold')
